@@ -34,7 +34,7 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(lygus_util PUBLIC rt)
 endif()
 
-# Tests  set to OFF to skip
+# Tests set to OFF to skip
 option(BUILD_TESTS "Build test executables" ON)
 
 if(BUILD_TESTS)
