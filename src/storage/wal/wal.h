@@ -1,0 +1,241 @@
+#ifndef LYGUS_WAL_H
+#define LYGUS_WAL_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <sys/types.h>
+
+#include "block_format.h"
+#include "recovery.h"
+#include "../../public/lygus_errors.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// ============================================================================
+// WAL Handle
+// ============================================================================
+
+/**
+ * Opaque WAL handle
+ *
+ * Manages write-ahead log with:
+ * - Automatic recovery on open
+ * - Block buffering and compression
+ * - Segment rotation
+ * - Durability guarantees
+ */
+typedef struct wal wal_t;
+
+// ============================================================================
+// Options
+// ============================================================================
+
+typedef struct {
+    const char *data_dir;           // Directory for WAL segments
+    int         zstd_level;         // Compression level (3-5 recommended, 0 = default)
+
+    // Group commit tuning
+    size_t      fsync_bytes;        // Auto-fsync after N bytes (0 = manual)
+    uint64_t    fsync_interval_us;  // Auto-fsync after N microseconds (0 = manual)
+
+    // Callbacks
+    wal_entry_callback_t on_recover; // Called for each entry during recovery
+    void                *user_data;  // Passed to on_recover callback
+} wal_opts_t;
+
+// ============================================================================
+// Statistics
+// ============================================================================
+
+typedef struct {
+    // Recovery stats (from last open)
+    uint64_t recovered_entries;
+    uint64_t recovered_blocks;
+    uint64_t highest_index;
+    uint64_t highest_term;
+    int      had_corruption;
+
+    // Current writer state
+    uint64_t segment_num;
+    uint64_t write_offset;
+    uint64_t block_seq;
+    size_t   block_fill;
+
+    // Runtime counters
+    uint64_t appends_total;
+    uint64_t flushes_total;
+    uint64_t fsyncs_total;
+    uint64_t bytes_written;
+} wal_stats_t;
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+/**
+ * Open or create WAL
+ *
+ * 1. Runs recovery on all existing segments
+ * 2. Invokes on_recover callback for each entry
+ * 3. Opens latest segment for appending (or creates new one)
+ * 4. Ready for writes
+ *
+ * @param opts  Configuration options
+ * @return      WAL handle, or NULL on error (check errno)
+ *
+ * Note: Recovery can take time on large WALs. Consider showing progress.
+ */
+wal_t* wal_open(const wal_opts_t *opts);
+
+/**
+ * Close WAL and flush all pending data
+ *
+ * Marks last block, flushes, fsyncs, and closes segment.
+ *
+ * @param w  WAL handle
+ * @return   LYGUS_OK on success, negative error code otherwise
+ */
+int wal_close(wal_t *w);
+
+// ============================================================================
+// Write Operations
+// ============================================================================
+
+/**
+ * Append PUT entry
+ *
+ * @param w      WAL handle
+ * @param index  Raft log index
+ * @param term   Raft term
+ * @param key    Key bytes
+ * @param klen   Key length
+ * @param val    Value bytes
+ * @param vlen   Value length
+ * @return       LYGUS_OK on success, negative error code otherwise
+ *
+ * Errors:
+ *   LYGUS_ERR_INVALID_ARG   - NULL handle, invalid params
+ *   LYGUS_ERR_KEY_TOO_LARGE - Key exceeds 64 KB
+ *   LYGUS_ERR_VAL_TOO_LARGE - Value exceeds 1 MB
+ *   LYGUS_ERR_WAL_FULL      - Segment full, need rotate
+ *   LYGUS_ERR_IO            - Write failed
+ *   LYGUS_ERR_DISK_FULL     - No space left
+ */
+int wal_put(wal_t *w, uint64_t index, uint64_t term,
+            const void *key, size_t klen,
+            const void *val, size_t vlen);
+
+/**
+ * Append DELETE entry
+ *
+ * @param w      WAL handle
+ * @param index  Raft log index
+ * @param term   Raft term
+ * @param key    Key bytes
+ * @param klen   Key length
+ * @return       LYGUS_OK on success, negative error code otherwise
+ */
+int wal_del(wal_t *w, uint64_t index, uint64_t term,
+            const void *key, size_t klen);
+
+/**
+ * Append NOOP_SYNC entry (for ALR)
+ *
+ * @param w      WAL handle
+ * @param index  Raft log index
+ * @param term   Raft term
+ * @return       LYGUS_OK on success, negative error code otherwise
+ */
+int wal_noop_sync(wal_t *w, uint64_t index, uint64_t term);
+
+/**
+ * Append SNAP_MARK entry (snapshot marker)
+ *
+ * @param w      WAL handle
+ * @param index  Raft log index (snapshot index)
+ * @param term   Raft term
+ * @return       LYGUS_OK on success, negative error code otherwise
+ */
+int wal_snap_mark(wal_t *w, uint64_t index, uint64_t term);
+
+// ============================================================================
+// Durability Control
+// ============================================================================
+
+/**
+ * Flush current block to disk
+ *
+ * Forces current block buffer to be written. Does NOT fsync unless
+ * sync parameter is true.
+ *
+ * @param w     WAL handle
+ * @param sync  If true, also call fdatasync()
+ * @return      LYGUS_OK on success, negative error code otherwise
+ */
+int wal_flush(wal_t *w, int sync);
+
+/**
+ * Force fsync (durability checkpoint)
+ *
+ * All data written before this call is guaranteed durable after success.
+ * This is the only way to ensure crash safety.
+ *
+ * @param w  WAL handle
+ * @return   LYGUS_OK on success, negative error code otherwise
+ */
+int wal_fsync(wal_t *w);
+
+// ============================================================================
+// Segment Management
+// ============================================================================
+
+/**
+ * Rotate to new segment
+ *
+ * Call after creating a snapshot to start fresh WAL.
+ * Also call if current segment is getting too large.
+ *
+ * @param w  WAL handle
+ * @return   LYGUS_OK on success, negative error code otherwise
+ */
+int wal_rotate(wal_t *w);
+
+/**
+ * Check if segment should be rotated
+ *
+ * Returns true if segment is approaching max size.
+ *
+ * @param w  WAL handle
+ * @return   1 if rotation recommended, 0 otherwise
+ */
+int wal_should_rotate(const wal_t *w);
+
+// ============================================================================
+// Observability
+// ============================================================================
+
+/**
+ * Get WAL statistics
+ *
+ * @param w     WAL handle
+ * @param stats Output statistics structure
+ * @return      LYGUS_OK on success, negative error code otherwise
+ */
+int wal_get_stats(const wal_t *w, wal_stats_t *stats);
+
+/**
+ * Get recovery result from last open
+ *
+ * @param w      WAL handle
+ * @param result Output recovery result structure
+ * @return       LYGUS_OK on success, negative error code otherwise
+ */
+int wal_get_recovery_result(const wal_t *w, wal_recovery_result_t *result);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // LYGUS_WAL_H
