@@ -38,27 +38,28 @@ wal_t* wal_open(const wal_opts_t *opts) {
     if (!opts || !opts->data_dir) {
         return NULL;
     }
-    
+
+
     // Allocate handle
     wal_t *w = calloc(1, sizeof(wal_t));
     if (!w) {
         return NULL;
     }
-    
+
     // Copy config
     strncpy(w->data_dir, opts->data_dir, sizeof(w->data_dir) - 1);
     w->zstd_level = (opts->zstd_level > 0) ? opts->zstd_level : 3;
-    
+
     // Create compression context
     w->zctx = lygus_zstd_create(w->zstd_level);
     if (!w->zctx) {
         free(w);
         return NULL;
     }
-    
+
     // Run recovery
     LOG_INFO_SIMPLE(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_RECOVERY, 0, 0);
-    
+
     int ret = wal_recover(opts->data_dir, w->zctx,
                           opts->on_recover, opts->user_data,
                           &w->recovery);
@@ -69,36 +70,22 @@ wal_t* wal_open(const wal_opts_t *opts) {
         free(w);
         return NULL;
     }
-    
-    // Log recovery stats
-    LOG_INFO(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_RECOVERY,
-             w->recovery.highest_term, w->recovery.highest_index,
-             &w->recovery, sizeof(w->recovery));
-    
     // Open writer
     wal_writer_opts_t writer_opts = {
         .data_dir = opts->data_dir,
         .zstd_level = w->zstd_level,
-        .block_size = 0,  // Default
+        .block_size = 0,
         .fsync_interval_us = opts->fsync_interval_us,
         .fsync_bytes = opts->fsync_bytes,
     };
-    
+
     w->writer = wal_writer_open(&writer_opts);
     if (!w->writer) {
         lygus_zstd_destroy(w->zctx);
         free(w);
         return NULL;
     }
-    
-    // Initialize runtime stats
-    w->appends_total = 0;
-    w->flushes_total = 0;
-    w->fsyncs_total = 0;
-    w->bytes_written = 0;
-    
-    LOG_INFO_SIMPLE(LYGUS_MODULE_WAL, LYGUS_EVENT_INIT, 0, 0);
-    
+
     return w;
 }
 
@@ -106,20 +93,20 @@ int wal_close(wal_t *w) {
     if (!w) {
         return LYGUS_ERR_INVALID_ARG;
     }
-    
+
     LOG_INFO_SIMPLE(LYGUS_MODULE_WAL, LYGUS_EVENT_SHUTDOWN, 0, 0);
-    
+
     // Close writer (flushes and fsyncs)
     int ret = LYGUS_OK;
     if (w->writer) {
         ret = wal_writer_close(w->writer);
     }
-    
+
     // Destroy compression context
     if (w->zctx) {
         lygus_zstd_destroy(w->zctx);
     }
-    
+
     free(w);
     
     return ret;

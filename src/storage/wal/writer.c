@@ -140,6 +140,8 @@ static int write_block(wal_writer_t *w) {
         return LYGUS_OK;  // Nothing to write
     }
 
+
+
     uint64_t start_ns = lygus_now_ns();  // ← START TIMER
 
     // Allocate compressed buffer (needs headroom for Zstd metadata)
@@ -338,6 +340,9 @@ int wal_writer_close(wal_writer_t *w) {
         return LYGUS_ERR_INVALID_ARG;
     }
 
+    printf("DEBUG: wal_writer_close() segment=%llu, block_fill=%zu\n",
+           w->segment_num, w->block_fill);
+
     // Mark last block and flush
     wal_writer_mark_last_block(w);
     int ret = wal_writer_flush(w, 1);  // Flush and sync
@@ -377,6 +382,7 @@ int wal_writer_append(wal_writer_t *w,
 
     // Check if entry fits in current block
     if (!entry_fits(w, type, index, term, klen, vlen)) {
+        printf("DEBUG: Entry doesn't fit! block_fill=%zu, flushing...\n", w->block_fill);
         // Flush current block first
         int ret = write_block(w);
         if (ret < 0) {
@@ -394,6 +400,19 @@ int wal_writer_append(wal_writer_t *w,
     }
 
     w->block_fill += (size_t)encoded;  // Now safe to update
+
+    if (w->segment_num == 2) {  // Only log for segment 2
+        printf("DEBUG SEG2: append index=%llu, block_fill now=%zu\n",
+               index, w->block_fill);
+    }
+
+    // NEW: Flush block if it's full, but DON'T fsync
+    if (w->block_fill >= WAL_BLOCK_SIZE * 0.9) {
+        int ret = write_block(w);
+        if (ret < 0) {
+            return ret;
+        }
+    }
 
     // CRITICAL: For Paxos I2 invariant, we MUST fsync before returning
     // Option A: Always fsync (simplest, correct, but slow)

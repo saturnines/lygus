@@ -68,7 +68,7 @@ int wal_list_segments(const char *data_dir,
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         uint64_t seg_num;
-        if (sscanf(entry->d_name, "WAL-%lu.log", &seg_num) == 1) {
+        if (sscanf(entry->d_name, "WAL-%llu.log", &seg_num) == 1) {
             count++;
         }
     }
@@ -92,7 +92,7 @@ int wal_list_segments(const char *data_dir,
     size_t idx = 0;
     while ((entry = readdir(dir)) != NULL && idx < count) {
         uint64_t seg_num;
-        if (sscanf(entry->d_name, "WAL-%lu.log", &seg_num) == 1) {
+        if (sscanf(entry->d_name, "WAL-%llu.log", &seg_num) == 1) {
             segs[idx++] = seg_num;
         }
     }
@@ -164,11 +164,11 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
     scanner->offset += sizeof(*hdr);
 
     // Validate header
-    int ret = wal_block_validate_header(hdr);
-    if (ret < 0) {
+    // int ret = wal_block_validate_header(hdr);
+    // if (ret < 0) {
         // Bad header - will truncate at block_start_offset
-        return ret;
-    }
+    //    return ret;
+    // }
 
     // Allocate buffer for compressed data
     uint8_t comp_buf[WAL_BLOCK_SIZE + 1024];
@@ -339,7 +339,7 @@ int wal_recover(const char *data_dir,
 
         // Build segment path
         char seg_path[512];
-        snprintf(seg_path, sizeof(seg_path), "%s/WAL-%06lu.log", data_dir, seg_num);
+        snprintf(seg_path, sizeof(seg_path), "%s/WAL-%06llu.log", data_dir, seg_num);
 
         // Open scanner
         wal_scanner_t *scanner = wal_scanner_open(seg_path, zctx);
@@ -367,12 +367,11 @@ int wal_recover(const char *data_dir,
             }
 
             if (decompressed < 0) {
-                // ANY error (TRUNCATED, CORRUPT, BAD_BLOCK, etc.)
-                // Truncate at block start
-                // Note: scanner needs helper to seek+truncate, or we expose fd
-                // For now, assume scanner internally handles this
+                printf("DEBUG: Segment %llu - Block read error: %zd at offset %llu\n",
+                       (unsigned long long)seg_num, decompressed,
+                       (unsigned long long)block_start);
                 result->corruptions++;
-                wal_scanner_truncate_at(scanner, block_start);  // ← Need new function
+                wal_scanner_truncate_at(scanner, block_start);
                 result->truncated = 1;
                 corrupted = 1;
                 break;
@@ -390,12 +389,10 @@ int wal_recover(const char *data_dir,
                                           &entry_offset, &entry);
 
                 if (ret == LYGUS_ERR_INCOMPLETE) {
-                    // End of block
                     break;
                 }
 
                 if (ret < 0) {
-                    // Entry corruption - truncate at block start
                     result->corruptions++;
                     wal_scanner_truncate_at(scanner, block_start);
                     result->truncated = 1;
