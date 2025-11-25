@@ -343,6 +343,7 @@ int wal_recover(const char *data_dir,
 
         // Open scanner
         wal_scanner_t *scanner = wal_scanner_open(seg_path, zctx);
+
         if (!scanner) {
             free(segments);
             return LYGUS_ERR_IO;

@@ -137,6 +137,7 @@ static int entry_fits(const wal_writer_t *w,
  */
 static int write_block(wal_writer_t *w) {
     if (w->block_fill == 0) {
+        w->block_flags = 0;
         return LYGUS_OK;  // Nothing to write
     }
 
@@ -340,9 +341,6 @@ int wal_writer_close(wal_writer_t *w) {
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    printf("DEBUG: wal_writer_close() segment=%llu, block_fill=%zu\n",
-           w->segment_num, w->block_fill);
-
     // Mark last block and flush
     wal_writer_mark_last_block(w);
     int ret = wal_writer_flush(w, 1);  // Flush and sync
@@ -508,6 +506,7 @@ int wal_writer_rotate(wal_writer_t *w) {
     // Reset state
     w->write_offset = 0;
     w->block_fill = 0;
+    w->block_flags = 0;
     w->bytes_since_fsync = 0;
     // Note: block_seq continues monotonically
 
