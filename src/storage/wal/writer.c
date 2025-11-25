@@ -378,9 +378,16 @@ int wal_writer_append(wal_writer_t *w,
         return LYGUS_ERR_WAL_FULL;  // Caller should rotate
     }
 
+    ssize_t entry_size = wal_entry_size(type, index, term, klen, vlen);
+    if (entry_size < 0) {
+        return (int)entry_size;
+    }
+    if ((size_t)entry_size > WAL_BLOCK_SIZE) {
+        return LYGUS_ERR_VAL_TOO_LARGE;  // Entry will never fit in a block
+    }
+
     // Check if entry fits in current block
     if (!entry_fits(w, type, index, term, klen, vlen)) {
-        printf("DEBUG: Entry doesn't fit! block_fill=%zu, flushing...\n", w->block_fill);
         // Flush current block first
         int ret = write_block(w);
         if (ret < 0) {
@@ -399,10 +406,6 @@ int wal_writer_append(wal_writer_t *w,
 
     w->block_fill += (size_t)encoded;  // Now safe to update
 
-    if (w->segment_num == 2) {  // Only log for segment 2
-        printf("DEBUG SEG2: append index=%llu, block_fill now=%zu\n",
-               index, w->block_fill);
-    }
 
     // NEW: Flush block if it's full, but DON'T fsync
     if (w->block_fill >= WAL_BLOCK_SIZE * 0.9) {
