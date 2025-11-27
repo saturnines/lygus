@@ -121,7 +121,6 @@ wal_scanner_t* wal_scanner_open(const char *path, void *zctx) {
 #else
     int fd = open(path, O_RDWR);
 #endif
-    // DELETE THIS LINE: int fd = open(path, O_RDWR);
     if (fd < 0) {
         return NULL;
     }
