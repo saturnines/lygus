@@ -116,7 +116,12 @@ wal_scanner_t* wal_scanner_open(const char *path, void *zctx) {
         return NULL;
     }
 
-    int fd = open(path, O_RDWR | O_BINARY);  // You must open files in binary mode during binary i/o or windows will fuck with it
+#ifdef _WIN32
+    int fd = open(path, O_RDWR | O_BINARY);
+#else
+    int fd = open(path, O_RDWR);
+#endif
+    // DELETE THIS LINE: int fd = open(path, O_RDWR);
     if (fd < 0) {
         return NULL;
     }
@@ -163,12 +168,12 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
 
     scanner->offset += sizeof(*hdr);
 
-    // Validate header
-    // int ret = wal_block_validate_header(hdr);
-    // if (ret < 0) {
+
+    int ret = wal_block_validate_header(hdr);
+    if (ret < 0) {
         // Bad header - will truncate at block_start_offset
-    //    return ret;
-    // }
+        return ret;
+     }
 
     // Allocate buffer for compressed data
     uint8_t comp_buf[WAL_BLOCK_SIZE + 1024];
@@ -181,7 +186,7 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
     // Read compressed payload
     n = read(scanner->fd, comp_buf, comp_len);
     if (n != (ssize_t)comp_len) {
-        // Partial block at EOF - will truncate at block_start_offset
+        // Partial block at EOF, will truncate at block_start_offset
         return LYGUS_ERR_TRUNCATED;
     }
 
@@ -192,7 +197,7 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
                                                  scanner->zctx,
                                                  raw_buf, raw_cap);
     if (decompressed < 0) {
-        // Corruption - will truncate at block_start_offset
+        // Corruption still will truncate at block_start_offset
         return decompressed;
     }
 
@@ -299,7 +304,7 @@ int wal_scanner_truncate_at(wal_scanner_t *scanner, uint64_t offset) {
 }
 
 // ============================================================================
-// Public API - High-Level Recovery
+// Public API - Recovery
 // ============================================================================
 
 int wal_recover(const char *data_dir,
@@ -325,7 +330,7 @@ int wal_recover(const char *data_dir,
     }
 
     if (num_segments == 0) {
-        // No WAL segments - fresh start
+        // No WAL segments, fresh start
         return LYGUS_OK;
     }
 
@@ -363,7 +368,7 @@ int wal_recover(const char *data_dir,
                                                           block_buf, sizeof(block_buf));
 
             if (decompressed == 0) {
-                // EOF - normal termination
+                // EOF normal termination
                 break;
             }
 
@@ -456,11 +461,11 @@ int wal_recover(const char *data_dir,
                 }
             }
 
-            break;  // Stop recovery - exit the for loop
+            break;
         }
-    }  // ← END OF FOR LOOP
+    }  // This is the end of the for loop
 
-    // Now we're outside the loop - cleanup and return
+    // Now we're outside the loop, cleanup and return
     free(segments);
 
     uint64_t end_ns = lygus_now_ns();

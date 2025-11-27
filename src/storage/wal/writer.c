@@ -22,6 +22,28 @@
     #define O_BINARY 0
 #endif
 
+//  file locking for linux and windows
+#ifdef _WIN32
+    #include <windows.h>
+    #include <io.h>
+
+    static int lock_file_exclusive(int fd) {
+        HANDLE h = (HANDLE)_get_osfhandle(fd);
+        OVERLAPPED ov = {0};
+        if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                        0, 1, 0, &ov)) {
+            return -1;
+                        }
+        return 0;
+    }
+#else
+#include <sys/file.h>
+
+static int lock_file_exclusive(int fd) {
+        return flock(fd, LOCK_EX | LOCK_NB);
+    }
+#endif
+
 // ============================================================================
 // Internal State
 // ============================================================================
@@ -93,7 +115,7 @@ static int open_segment(const char *data_dir, uint64_t seg_num, int create) {
     char path[512];
     get_segment_path(data_dir, seg_num, path, sizeof(path));
 
-    int flags = O_RDWR | O_BINARY;  // O_BINARY is critical on Windows!
+    int flags = O_RDWR | O_BINARY;
     if (create) {
         flags |= O_CREAT | O_EXCL;
     }
@@ -103,13 +125,18 @@ static int open_segment(const char *data_dir, uint64_t seg_num, int create) {
         return -1;
     }
 
-    // Seek to end if appending to existing file
+    // Seek to end if appending
     if (!create) {
-        off_t end = lseek(fd, 0, SEEK_END);
-        if (end < 0) {
+        if (lseek(fd, 0, SEEK_END) < 0) {
             close(fd);
             return -1;
         }
+    }
+
+    // Acquire exclusive lock
+    if (lock_file_exclusive(fd) < 0) {
+        close(fd);
+        return -1;
     }
 
     return fd;
@@ -358,6 +385,7 @@ int wal_writer_close(wal_writer_t *w) {
 
     return ret;
 }
+
 
 // ============================================================================
 // Public API - Write Operations
