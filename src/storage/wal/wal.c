@@ -141,7 +141,7 @@ wal_t* wal_open(const wal_opts_t *opts) {
         .entry_offset_in_block = 0,
     };
 
-    // TODO: The current recovery API doesn't expose segment/block info
+    // TODO: The current recovery API doesn't expose segment/block info hmm
     // For now, we run recovery without index building, then the index
     // tracks entries as they're appended going forward.
     // A proper fix would modify wal_recover to pass location info.
