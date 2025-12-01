@@ -209,12 +209,6 @@ size_t wal_writer_block_fill(const wal_writer_t *w);
  */
 int wal_writer_block_is_empty(const wal_writer_t *w);
 
-#ifdef __cplusplus
-}
-#endif
-
-#endif // LYGUS_WAL_WRITER_H
-
 /**
  * Check if all appended data has been fsynced
  *
@@ -222,3 +216,9 @@ int wal_writer_block_is_empty(const wal_writer_t *w);
  * @return   1 if everything is durable, 0 if there's unflushed data
  */
 int wal_writer_is_durable(const wal_writer_t *w);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // LYGUS_WAL_WRITER_H

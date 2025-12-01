@@ -25,6 +25,7 @@ extern "C" {
  * - Block buffering and compression
  * - Segment rotation
  * - Durability guarantees
+ * - In-memory index for O(1) entry lookup
  */
 typedef struct wal wal_t;
 
@@ -63,6 +64,10 @@ typedef struct {
     uint64_t block_seq;
     size_t   block_fill;
 
+    // Index state
+    uint64_t first_index;      // First index in log (after compaction)
+    uint64_t last_index;       // Last index in log
+
     // Runtime counters
     uint64_t appends_total;
     uint64_t flushes_total;
@@ -78,9 +83,10 @@ typedef struct {
  * Open or create WAL
  *
  * 1. Runs recovery on all existing segments
- * 2. Invokes on_recover callback for each entry
- * 3. Opens latest segment for appending (or creates new one)
- * 4. Ready for writes
+ * 2. Builds in-memory index for O(1) lookup
+ * 3. Invokes on_recover callback for each entry
+ * 4. Opens latest segment for appending (or creates new one)
+ * 5. Ready for writes
  *
  * @param opts  Configuration options
  * @return      WAL handle, or NULL on error (check errno)
@@ -118,7 +124,7 @@ int wal_close(wal_t *w);
  * Errors:
  *   LYGUS_ERR_INVALID_ARG   - NULL handle, invalid params
  *   LYGUS_ERR_KEY_TOO_LARGE - Key exceeds 64 KB
- *   LYGUS_ERR_VAL_TOO_LARGE - Value exceeds 1 MB
+ *   LYGUS_ERR_VAL_TOO_LARGE - Value exceeds limit
  *   LYGUS_ERR_WAL_FULL      - Segment full, need rotate
  *   LYGUS_ERR_IO            - Write failed
  *   LYGUS_ERR_DISK_FULL     - No space left
@@ -211,6 +217,93 @@ int wal_rotate(wal_t *w);
  * @return   1 if rotation recommended, 0 otherwise
  */
 int wal_should_rotate(const wal_t *w);
+
+// ============================================================================
+// Log Truncation (for willemt/raft integration)
+// ============================================================================
+
+/**
+ * Truncate log after index (remove newer entries)
+ *
+ * Used by Raft when leader overwrites conflicting entries on follower.
+ * Maps to willemt/raft's log_pop callback.
+ *
+ * Keeps entries up to and including `index`, removes everything after.
+ * Physically truncates the segment file to reclaim space.
+ *
+ * IMPORTANT: This fsyncs before returning to ensure durability.
+ *
+ * @param w      WAL handle
+ * @param index  Last index to keep (entries > index are removed)
+ * @return       LYGUS_OK on success, negative error code otherwise
+ *
+ * Errors:
+ *   LYGUS_ERR_INVALID_ARG   - NULL handle
+ *   LYGUS_ERR_KEY_NOT_FOUND - Index not in log
+ *   LYGUS_ERR_IO            - Truncate failed
+ *   LYGUS_ERR_FSYNC         - Fsync after truncate failed
+ */
+int wal_truncate_after(wal_t *w, uint64_t index);
+
+/**
+ * Purge log entries before index (remove older entries)
+ *
+ * Used after snapshotting to reclaim disk space.
+ * Maps to willemt/raft's log_poll callback (called repeatedly).
+ *
+ * Deletes entire segments that contain only entries < index.
+ * Does NOT modify segments that contain entries >= index.
+ *
+ * @param w      WAL handle
+ * @param index  First index to keep (segments fully before this are deleted)
+ * @return       LYGUS_OK on success, negative error code otherwise
+ *
+ * Errors:
+ *   LYGUS_ERR_INVALID_ARG  - NULL handle
+ *   LYGUS_ERR_IO           - Delete failed
+ */
+int wal_purge_before(wal_t *w, uint64_t index);
+
+/**
+ * Clear all log entries
+ *
+ * Deletes all segments and resets to empty state.
+ * Used when loading a snapshot that replaces the entire log.
+ * Maps to willemt/raft's log_clear callback.
+ *
+ * @param w  WAL handle
+ * @return   LYGUS_OK on success, negative error code otherwise
+ */
+int wal_clear(wal_t *w);
+
+// ============================================================================
+// Index Queries
+// ============================================================================
+
+/**
+ * Get first index in log
+ *
+ * @param w  WAL handle
+ * @return   First index, or 0 if empty
+ */
+uint64_t wal_first_index(const wal_t *w);
+
+/**
+ * Get last index in log
+ *
+ * @param w  WAL handle
+ * @return   Last index, or 0 if empty
+ */
+uint64_t wal_last_index(const wal_t *w);
+
+/**
+ * Check if log contains an index
+ *
+ * @param w      WAL handle
+ * @param index  Index to check
+ * @return       1 if present, 0 if not
+ */
+int wal_contains_index(const wal_t *w, uint64_t index);
 
 // ============================================================================
 // Observability

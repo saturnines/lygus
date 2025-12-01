@@ -62,7 +62,7 @@ ssize_t wal_entry_encode(wal_entry_type_t type, uint64_t index, uint64_t term,
     // Calculate needed size
     ssize_t needed = wal_entry_size(type, index, term, klen, vlen);
     if (needed < 0) {
-        return needed;  // Propagate error
+        return needed;
     }
 
     // Check buffer capacity
@@ -96,7 +96,7 @@ ssize_t wal_entry_encode(wal_entry_type_t type, uint64_t index, uint64_t term,
     // Compute CRC over everything so far
     uint32_t crc = crc32c(out, pos);
 
-    // Write CRC (little-endian)
+    // Write CRC (little endian)
     out[pos++] = (crc >> 0) & 0xFF;
     out[pos++] = (crc >> 8) & 0xFF;
     out[pos++] = (crc >> 16) & 0xFF;
@@ -241,7 +241,7 @@ ssize_t wal_block_compress(const uint8_t *raw_data, size_t raw_len,
     // Compute CRC over final payload
     uint32_t crc = crc32c(final_data, final_len);
 
-    // Fill header
+    // Fill header (except header CRC)
     out_hdr->magic = WAL_BLOCK_MAGIC;
     out_hdr->version = WAL_BLOCK_VERSION;
     out_hdr->flags = flags;
@@ -249,6 +249,9 @@ ssize_t wal_block_compress(const uint8_t *raw_data, size_t raw_len,
     out_hdr->raw_len = (uint32_t)raw_len;
     out_hdr->comp_len = (uint32_t)final_len;
     out_hdr->crc32c = crc;
+
+    // Compute header CRC over first 28 bytes (everything except hdr_crc32c)
+    out_hdr->hdr_crc32c = crc32c((const uint8_t *)out_hdr, WAL_BLOCK_HDR_CRC_OFFSET);
 
     return (ssize_t)final_len;
 }
@@ -289,15 +292,15 @@ ssize_t wal_block_decompress(const wal_block_hdr_t *hdr,
         memcpy(out_raw, comp_data, hdr->raw_len);
         return (ssize_t)hdr->raw_len;
     } else {
-        // Data is compressed - decompress it
+        // decompress if data is compressed
         lygus_zstd_ctx_t *zstd_ctx = (lygus_zstd_ctx_t *)zctx;
         size_t decompressed = lygus_zstd_decompress(zstd_ctx, out_raw, out_cap,
                                                      comp_data, comp_len);
-        
+
         if (decompressed == 0) {
             return LYGUS_ERR_DECOMPRESS;
         }
-        
+
         if (decompressed != hdr->raw_len) {
             return LYGUS_ERR_MALFORMED;
         }
@@ -310,6 +313,12 @@ int wal_block_validate_header(const wal_block_hdr_t *hdr)
 {
     if (!hdr) {
         return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // check header CRC first
+    uint32_t computed_hdr_crc = crc32c((const uint8_t *)hdr, WAL_BLOCK_HDR_CRC_OFFSET);
+    if (computed_hdr_crc != hdr->hdr_crc32c) {
+        return LYGUS_ERR_CORRUPT;
     }
 
     // Check magic number

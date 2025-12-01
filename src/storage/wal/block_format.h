@@ -68,9 +68,13 @@ typedef struct {
     uint32_t raw_len;    // Bytes before compression
     uint32_t comp_len;   // Bytes after compression (0 if uncompressed)
     uint32_t crc32c;     // CRC over compressed payload
+    uint32_t hdr_crc32c; // CRC over header bytes 0-27 (excludes this field)
 } __attribute__((packed)) wal_block_hdr_t;
 
-_Static_assert(sizeof(wal_block_hdr_t) == 28, "Block header must be 28 bytes");
+_Static_assert(sizeof(wal_block_hdr_t) == 32, "Block header must be 32 bytes");
+
+// Offset of hdr_crc32c field (bytes covered by header checksum)
+#define WAL_BLOCK_HDR_CRC_OFFSET 28
 
 // ============================================================================
 // Entry API
@@ -199,10 +203,10 @@ ssize_t wal_block_decompress(const wal_block_hdr_t *hdr,
                              uint8_t *out_raw, size_t out_cap);
 
 /**
- * Validate block header (basic sanity checks)
+ * Validate block header
  *
  * Checks magic number, version, and reasonable field values.
- * Does NOT verify CRC (that's done in wal_block_decompress).
+ * Does NOT verify CRC (done in wal_block_decompress).
  *
  * @param hdr  Block header to validate
  * @return     LYGUS_OK or negative error code
