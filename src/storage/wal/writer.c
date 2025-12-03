@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -80,7 +81,7 @@ struct wal_writer {
  * Get current segment file path
  */
 static void get_segment_path(const char *data_dir, uint64_t seg_num, char *out, size_t out_len) {
-    snprintf(out, out_len, "%s/WAL-%06llu.log", data_dir, seg_num);
+    snprintf(out, out_len, "%s/WAL-%06" PRIu64 ".log", data_dir, seg_num);
 }
 
 /**
@@ -96,7 +97,7 @@ static uint64_t find_latest_segment(const char *data_dir) {
 
     while ((entry = readdir(dir)) != NULL) {
         uint64_t seg_num;
-        if (sscanf(entry->d_name, "WAL-%llu.log", &seg_num) == 1) {
+        if (sscanf(entry->d_name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
             if (seg_num > max_seg) {
                 max_seg = seg_num;
             }

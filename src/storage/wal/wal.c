@@ -6,7 +6,7 @@
 #include "../compression/zstd_engine.h"
 
 #include <stdlib.h>
-#include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -92,8 +92,7 @@ static int recovery_index_builder(const wal_entry_t *entry, void *ctx) {
 
 static void get_segment_path(const char *data_dir, uint64_t seg_num,
                              char *out, size_t out_len) {
-    snprintf(out, out_len, "%s/WAL-%06llu.log", data_dir,
-             (unsigned long long)seg_num);
+    snprintf(out, out_len, "%s/WAL-%06" PRIu64 ".log", data_dir, seg_num);
 }
 
 // ============================================================================
@@ -471,7 +470,7 @@ int wal_purge_before(wal_t *w, uint64_t index) {
     // Returns 0 if all entries are older than index (meaning we can delete all non-current segments)
     uint64_t keep_from_segment = wal_index_min_segment_from(w->index, index);
     if (keep_from_segment == 0) {
-
+        // All entries are old - allow deleting all segments except current
         keep_from_segment = UINT64_MAX;
     }
 

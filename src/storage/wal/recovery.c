@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -68,7 +69,7 @@ int wal_list_segments(const char *data_dir,
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         uint64_t seg_num;
-        if (sscanf(entry->d_name, "WAL-%llu.log", &seg_num) == 1) {
+        if (sscanf(entry->d_name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
             count++;
         }
     }
@@ -92,7 +93,7 @@ int wal_list_segments(const char *data_dir,
     size_t idx = 0;
     while ((entry = readdir(dir)) != NULL && idx < count) {
         uint64_t seg_num;
-        if (sscanf(entry->d_name, "WAL-%llu.log", &seg_num) == 1) {
+        if (sscanf(entry->d_name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
             segs[idx++] = seg_num;
         }
     }
@@ -207,34 +208,6 @@ uint64_t wal_scanner_offset(const wal_scanner_t *scanner) {
     return scanner ? scanner->offset : 0;
 }
 
-int wal_scanner_truncate(wal_scanner_t *scanner) {
-    if (!scanner) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
-
-    // CRITICAL: offset should already be at block_start before calling this
-    // The caller (wal_recover) needs to track the last good position
-
-    // Truncate at current offset (which should be start of bad block)
-    if (ftruncate(scanner->fd, scanner->offset) < 0) {
-        return LYGUS_ERR_IO;
-    }
-
-    // Fsync to ensure truncation is durable
-#ifdef _WIN32
-    if (_commit(scanner->fd) < 0) {
-#else
-    if (fdatasync(scanner->fd) < 0) {
-#endif
-        return LYGUS_ERR_FSYNC;
-    }
-
-    LOG_WARN(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_CORRUPTION,
-             0, 0, NULL, 0);
-
-    return LYGUS_OK;
-}
-
 void wal_scanner_close(wal_scanner_t *scanner) {
     if (!scanner) return;
 
@@ -343,7 +316,7 @@ int wal_recover(const char *data_dir,
 
         // Build segment path
         char seg_path[512];
-        snprintf(seg_path, sizeof(seg_path), "%s/WAL-%06llu.log", data_dir, seg_num);
+        snprintf(seg_path, sizeof(seg_path), "%s/WAL-%06" PRIu64 ".log", data_dir, seg_num);
 
         // Open scanner
         wal_scanner_t *scanner = wal_scanner_open(seg_path, zctx);
@@ -370,11 +343,10 @@ int wal_recover(const char *data_dir,
                 // EOF normal termination
                 break;
             }
-
+            // TODO remove print statement
             if (decompressed < 0) {
-                printf("DEBUG: Segment %llu - Block read error: %zd at offset %llu\n",
-                       (unsigned long long)seg_num, decompressed,
-                       (unsigned long long)block_start);
+                printf("DEBUG: Segment %" PRIu64 " - Block read error: %zd at offset %" PRIu64 "\n",
+                       seg_num, decompressed, block_start);
                 result->corruptions++;
                 wal_scanner_truncate_at(scanner, block_start);
                 result->truncated = 1;
@@ -452,7 +424,7 @@ int wal_recover(const char *data_dir,
             // Delete all segments after the corrupted one
             for (size_t j = i + 1; j < num_segments; j++) {
                 char dead_path[512];
-                snprintf(dead_path, sizeof(dead_path), "%s/WAL-%06llu.log",
+                snprintf(dead_path, sizeof(dead_path), "%s/WAL-%06" PRIu64 ".log",
                          data_dir, segments[j]);
 
                 if (unlink(dead_path) == 0) {

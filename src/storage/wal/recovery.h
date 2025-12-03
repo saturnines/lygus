@@ -126,17 +126,6 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
 uint64_t wal_scanner_offset(const wal_scanner_t *scanner);
 
 /**
- * Truncate segment at current offset
- *
- * Truncates the file at the current read position. Used when corruption
- * is detected to discard bad data.
- *
- * @param scanner  Scanner handle
- * @return         LYGUS_OK on success, negative error code otherwise
- */
-int wal_scanner_truncate(wal_scanner_t *scanner);
-
-/**
  * Close scanner
  *
  * @param scanner  Scanner handle
