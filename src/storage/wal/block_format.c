@@ -194,6 +194,11 @@ ssize_t wal_entry_decode(const uint8_t *buf, size_t buf_len, wal_entry_t *entry)
     entry->vlen = (size_t)vlen;
     entry->crc = stored_crc;
 
+    // Initialize location fields to 0 (caller must set if needed)
+    entry->segment_num = 0;
+    entry->block_offset = 0;
+    entry->entry_offset = 0;
+
     return (ssize_t)pos;
 }
 

@@ -389,6 +389,9 @@ int wal_recover(const char *data_dir,
             // Iterate entries in this block
             size_t entry_offset = 0;
             while (entry_offset < (size_t)decompressed) {
+                // Save entry offset BEFORE decoding (this is the entry's position)
+                size_t this_entry_offset = entry_offset;
+
                 wal_entry_t entry;
                 ret = wal_block_next_entry(block_buf, decompressed,
                                           &entry_offset, &entry);
@@ -415,7 +418,10 @@ int wal_recover(const char *data_dir,
                     result->highest_term = entry.term;
                 }
 
-                // Invoke callback
+                //Populate location info before callback
+                entry.segment_num = seg_num;
+                entry.block_offset = block_start;
+                entry.entry_offset = this_entry_offset;
                 if (callback) {
                     ret = callback(&entry, user_data);
                     if (ret < 0) {
@@ -487,4 +493,3 @@ int wal_recover(const char *data_dir,
 
     return LYGUS_OK;
 }
-

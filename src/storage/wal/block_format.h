@@ -54,6 +54,11 @@ typedef struct {
     size_t vlen;
 
     uint32_t crc;         // Stored CRC (for debugging)
+
+    // Location info (populated during recovery for index rebuilding)
+    uint64_t segment_num;   // Which segment file (0 if not set)
+    uint64_t block_offset;  // Byte offset of block start in segment
+    uint64_t entry_offset;  // Byte offset of entry within decompressed block
 } wal_entry_t;
 
 // ============================================================================
@@ -133,6 +138,9 @@ ssize_t wal_entry_encode(wal_entry_type_t type, uint64_t index, uint64_t term,
  *
  * The returned entry's key/val pointers reference the input buffer directly.
  * They remain valid as long as buf is not modified or freed.
+ *
+ * Note: Location fields (segment_num, block_offset, entry_offset) are NOT
+ * populated by this function - caller must set them if needed.
  *
  * @param buf      Input buffer
  * @param buf_len  Buffer length

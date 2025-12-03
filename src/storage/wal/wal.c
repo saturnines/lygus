@@ -53,25 +53,23 @@ typedef struct {
     wal_t               *wal;
     wal_entry_callback_t user_callback;
     void                *user_data;
-    uint64_t             current_segment;
-    uint64_t             current_block_offset;
-    uint64_t             entry_offset_in_block;
 } recovery_ctx_t;
 
-/**
- * Internal recovery callback - builds index and forwards to user callback
- */
+
+// Internal recovery callback - builds index and forwards to user callback
 static int recovery_index_builder(const wal_entry_t *entry, void *ctx) {
     recovery_ctx_t *rctx = (recovery_ctx_t *)ctx;
 
-    // Add to index
+    // Add to index using location info from the entry
     int ret = wal_index_append(rctx->wal->index,
                                entry->index,
-                               rctx->current_segment,
-                               rctx->current_block_offset,
-                               rctx->entry_offset_in_block);
+                               entry->segment_num,
+                               entry->block_offset,
+                               entry->entry_offset);
     if (ret < 0) {
-        return ret;
+        // Log but don't fail - index can be rebuilt
+        LOG_ERROR(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_RECOVERY,
+                  entry->term, entry->index, NULL, 0);
     }
 
     // Forward to user callback if provided
@@ -129,25 +127,19 @@ wal_t* wal_open(const wal_opts_t *opts) {
         return NULL;
     }
 
-    // Run recovery with index building callback
+    // Set up recovery context with index building callback
     LOG_INFO_SIMPLE(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_RECOVERY, 0, 0);
 
     recovery_ctx_t rctx = {
         .wal = w,
         .user_callback = opts->on_recover,
         .user_data = opts->user_data,
-        .current_segment = 0,
-        .current_block_offset = 0,
-        .entry_offset_in_block = 0,
     };
 
-    // TODO: The current recovery API doesn't expose segment/block info hmm
-    // For now, we run recovery without index building, then the index
-    // tracks entries as they're appended going forward.
-    // A proper fix would modify wal_recover to pass location info.
-
+    // Use recovery_index_builder as callback
+    // entries to the user's callback if provided
     int ret = wal_recover(opts->data_dir, w->zctx,
-                          opts->on_recover, opts->user_data,
+                          recovery_index_builder, &rctx,
                           &w->recovery);
     if (ret < 0) {
         LOG_ERROR(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_RECOVERY,
