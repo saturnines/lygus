@@ -32,6 +32,8 @@ struct wal {
     // Options
     char                 data_dir[256];
     int                  zstd_level;
+    uint64_t             fsync_interval_us;
+    size_t               fsync_bytes;
 
     // Current write position tracking (for index)
     uint64_t             current_segment;
@@ -111,6 +113,8 @@ wal_t* wal_open(const wal_opts_t *opts) {
     // Copy config
     strncpy(w->data_dir, opts->data_dir, sizeof(w->data_dir) - 1);
     w->zstd_level = (opts->zstd_level > 0) ? opts->zstd_level : 3;
+    w->fsync_interval_us = opts->fsync_interval_us;
+    w->fsync_bytes = opts->fsync_bytes;
 
     // Create compression context
     w->zctx = lygus_zstd_create(w->zstd_level);
@@ -436,8 +440,8 @@ int wal_truncate_after(wal_t *w, uint64_t index) {
         .data_dir = w->data_dir,
         .zstd_level = w->zstd_level,
         .block_size = 0,
-        .fsync_interval_us = 0,
-        .fsync_bytes = 0,
+        .fsync_interval_us = w->fsync_interval_us,
+        .fsync_bytes = w->fsync_bytes,
     };
 
     w->writer = wal_writer_open(&writer_opts);
@@ -542,8 +546,8 @@ int wal_clear(wal_t *w) {
         .data_dir = w->data_dir,
         .zstd_level = w->zstd_level,
         .block_size = 0,
-        .fsync_interval_us = 0,
-        .fsync_bytes = 0,
+        .fsync_interval_us = w->fsync_interval_us,
+        .fsync_bytes = w->fsync_bytes,
     };
 
     w->writer = wal_writer_open(&writer_opts);
