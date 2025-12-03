@@ -6,6 +6,7 @@
 #include "../compression/zstd_engine.h"
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -467,9 +468,11 @@ int wal_purge_before(wal_t *w, uint64_t index) {
     }
 
     // Find the minimum segment that contains entries >= index
+    // Returns 0 if all entries are older than index (meaning we can delete all non-current segments)
     uint64_t keep_from_segment = wal_index_min_segment_from(w->index, index);
     if (keep_from_segment == 0) {
-        return LYGUS_OK;  // All entries are before index, but we can't delete current segment
+
+        keep_from_segment = UINT64_MAX;
     }
 
     // List all segments
