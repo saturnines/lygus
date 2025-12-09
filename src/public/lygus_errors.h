@@ -32,6 +32,7 @@ typedef enum {
   LYGUS_ERR_NOT_INIT      = -3,   // Lygus not initialized (lygus_open not called)
   LYGUS_ERR_ALREADY_INIT  = -4,   // Already initialized
   LYGUS_ERR_INTERNAL      = -5,   // Internal error (should not happen)
+  LYGUS_ERR_BUSY          = -6,   // Operation in progress (for snapshotting)
 
   // ============================================================================
   // I/O and Storage errors (10-29)
