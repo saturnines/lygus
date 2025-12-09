@@ -50,7 +50,8 @@ typedef enum {
     LYGUS_MODULE_APPLY    = 5,
     LYGUS_MODULE_SNAPSHOT = 6,
     LYGUS_MODULE_KV       = 7,
-    LYGUS_MODULE_COUNT    = 8,
+    LYGUS_MODULE_STORAGE  = 8,
+    LYGUS_MODULE_COUNT    = 9,
 } lygus_module_t;
 
 // ============================================================================

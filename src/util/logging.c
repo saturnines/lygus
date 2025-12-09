@@ -74,7 +74,7 @@ static const char *level_names[] = {
 };
 
 static const char *module_names[] = {
-    "core", "raft", "wal", "alr", "net", "apply", "snapshot", "kv"
+    "core", "raft", "wal", "alr", "net", "apply", "snapshot", "kv", "storage"
 };
 
 // ============================================================================
