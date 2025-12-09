@@ -262,45 +262,39 @@ ssize_t wal_block_compress(const uint8_t *raw_data, size_t raw_len,
 }
 
 ssize_t wal_block_decompress(const wal_block_hdr_t *hdr,
-                             const uint8_t *comp_data, size_t comp_len,
+                             const uint8_t *comp_data,
                              void *zctx,
                              uint8_t *out_raw, size_t out_cap)
 {
-    // Validate inputs
     if (!hdr || !comp_data || !out_raw || !zctx) {
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    // Validate header first
     int ret = wal_block_validate_header(hdr);
     if (ret < 0) {
         return ret;
     }
 
-    // Check buffer capacity
     if (out_cap < hdr->raw_len) {
         return LYGUS_ERR_INCOMPLETE;
     }
 
-    // Verify payload CRC
-    uint32_t computed_crc = crc32c(comp_data, comp_len);
+    // Verify payload CRC - use header as source of truth
+    uint32_t computed_crc = crc32c(comp_data, hdr->comp_len);
     if (computed_crc != hdr->crc32c) {
         return LYGUS_ERR_CORRUPT;
     }
 
-    // Decompress or copy
     if (hdr->flags & WAL_FLAG_UNCOMPRESSED) {
-        // Data is uncompressed - direct copy
-        if (comp_len != hdr->raw_len) {
+        if (hdr->comp_len != hdr->raw_len) {
             return LYGUS_ERR_MALFORMED;
         }
         memcpy(out_raw, comp_data, hdr->raw_len);
         return (ssize_t)hdr->raw_len;
     } else {
-        // decompress if data is compressed
         lygus_zstd_ctx_t *zstd_ctx = (lygus_zstd_ctx_t *)zctx;
         size_t decompressed = lygus_zstd_decompress(zstd_ctx, out_raw, out_cap,
-                                                     comp_data, comp_len);
+                                                     comp_data, hdr->comp_len);
 
         if (decompressed == 0) {
             return LYGUS_ERR_DECOMPRESS;

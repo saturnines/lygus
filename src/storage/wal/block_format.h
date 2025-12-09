@@ -205,10 +205,10 @@ ssize_t wal_block_compress(const uint8_t *raw_data, size_t raw_len,
  *   LYGUS_ERR_DECOMPRESS   - Decompression failed
  *   LYGUS_ERR_INCOMPLETE   - Output buffer too small
  */
-ssize_t wal_block_decompress(const wal_block_hdr_t *hdr,
-                             const uint8_t *comp_data, size_t comp_len,
-                             void *zctx,
-                             uint8_t *out_raw, size_t out_cap);
+    ssize_t wal_block_decompress(const wal_block_hdr_t *hdr,
+                                 const uint8_t *comp_data,
+                                 void *zctx,
+                                 uint8_t *out_raw, size_t out_cap);
 
 /**
  * Validate block header
