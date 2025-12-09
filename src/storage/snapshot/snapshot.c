@@ -375,9 +375,13 @@ int snapshot_load(const char *path,
     LOG_INFO_SIMPLE(LYGUS_MODULE_SNAPSHOT, LYGUS_EVENT_SNAPSHOT_LOAD,
                     hdr.last_term, hdr.last_index);
 
-    ret = LYGUS_OK;
+    close(fd);
+    return LYGUS_OK;
 
 cleanup:
+    // On ANY error after we started loading, clear the KV to avoid
+    // leaving it in a partial/dirty state
+    lygus_kv_clear(kv);
     close(fd);
     return ret;
 }

@@ -193,7 +193,7 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
     scanner->offset += comp_len;
 
     // Decompress block
-    ssize_t decompressed = wal_block_decompress(hdr, comp_buf, comp_len,
+    ssize_t decompressed = wal_block_decompress(hdr, comp_buf,
                                                  scanner->zctx,
                                                  raw_buf, raw_cap);
     if (decompressed < 0) {
