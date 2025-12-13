@@ -641,3 +641,99 @@ int wal_get_recovery_result(const wal_t *w, wal_recovery_result_t *result) {
     memcpy(result, &w->recovery, sizeof(*result));
     return LYGUS_OK;
 }
+
+// I need windows support
+int wal_read_entry(wal_t *w, uint64_t index, wal_entry_t *entry,
+                   uint8_t *buf, size_t buf_cap)
+{
+    if (!w || !entry || !buf) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    if (buf_cap < WAL_BLOCK_SIZE) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // Look up entry location in index
+    wal_entry_loc_t loc;
+    int ret = wal_index_lookup(w->index, index, &loc);
+    if (ret != LYGUS_OK) {
+        return ret;
+    }
+
+    // Build segment path
+    char path[512];
+    snprintf(path, sizeof(path), "%s/WAL-%06" PRIu64 ".log",
+             w->data_dir, loc.segment_num);
+
+    // Open segment file
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return LYGUS_ERR_IO;
+    }
+
+    // Read block header
+    wal_block_hdr_t hdr;
+    ssize_t n = pread(fd, &hdr, sizeof(hdr), loc.block_offset);
+    if (n != sizeof(hdr)) {
+        close(fd);
+        return LYGUS_ERR_IO;
+    }
+
+    // Validate header
+    ret = wal_block_validate_header(&hdr);
+    if (ret != LYGUS_OK) {
+        close(fd);
+        return ret;
+    }
+
+    // Read compressed payload
+    uint8_t comp_buf[WAL_BLOCK_SIZE + 1024];
+    if (hdr.comp_len > sizeof(comp_buf)) {
+        close(fd);
+        return LYGUS_ERR_BAD_BLOCK;
+    }
+
+    n = pread(fd, comp_buf, hdr.comp_len, loc.block_offset + sizeof(hdr));
+    if (n != (ssize_t)hdr.comp_len) {
+        close(fd);
+        return LYGUS_ERR_IO;
+    }
+
+    close(fd);
+
+    // Decompress block
+    ssize_t decompressed = wal_block_decompress(&hdr, comp_buf, w->zctx,
+                                                 buf, buf_cap);
+    if (decompressed < 0) {
+        return (int)decompressed;
+    }
+
+    // Now iterate through entries to find the one at entry_offset
+    // (We need to decode from the start because entries are variable-length)
+    size_t offset = 0;
+    while (offset < (size_t)decompressed) {
+        size_t this_entry_offset = offset;
+
+        ret = wal_block_next_entry(buf, decompressed, &offset, entry);
+        if (ret == LYGUS_ERR_INCOMPLETE) {
+            // Reached end of block without finding entry
+            return LYGUS_ERR_KEY_NOT_FOUND;
+        }
+        if (ret != LYGUS_OK) {
+            return ret;
+        }
+
+        // Check if this is the entry we're looking for
+        if (entry->index == index) {
+            return LYGUS_OK;
+        }
+
+        // If we've gone past the target index, entry doesn't exist
+        if (entry->index > index) {
+            return LYGUS_ERR_KEY_NOT_FOUND;
+        }
+    }
+
+    return LYGUS_ERR_KEY_NOT_FOUND;
+}

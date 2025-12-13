@@ -305,6 +305,19 @@ uint64_t wal_last_index(const wal_t *w);
  */
 int wal_contains_index(const wal_t *w, uint64_t index);
 
+/**
+ * Read a single entry from WAL by index.
+ *
+ * @param w        WAL handle
+ * @param index    Raft log index to read
+ * @param entry    Decoded entry metadata/output
+ * @param buf      Scratch buffer for decompressed block data
+ * @param buf_cap  Size of scratch buffer
+ *
+ * @return LYGUS_OK on success, error code otherwise
+ */
+int wal_read_entry(wal_t *w, uint64_t index, wal_entry_t *entry,
+                   uint8_t *buf, size_t buf_cap);
 // ============================================================================
 // Observability
 // ============================================================================
