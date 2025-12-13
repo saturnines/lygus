@@ -6,6 +6,15 @@
  *   - Moment 1 (log_*): Persist to WAL, fsync, safe to ACK
  *   - Moment 2 (apply_*): Apply to KV after commit known
  *
+ * RECOVERY SEMANTICS:
+ *   After storage_mgr_open():
+ *     - applied_index = snapshot index (or 0 if no snapshot)
+ *     - logged_index = last entry in WAL
+ *     - KV state = snapshot state (entries NOT auto-applied from WAL)
+ *
+ *   Raft layer must call storage_mgr_replay_to(commit_index) after
+ *   learning the current commit state from the cluster.
+ *
  * Cross-platform: Windows uses synchronous snapshots,
  * POSIX uses fork-based async snapshots with COW.
  */
@@ -67,8 +76,11 @@ void storage_mgr_config_init(storage_mgr_config_t *cfg);
  *
  * Recovery order:
  *   1. Find latest snapshot, load into KV if exists
- *   2. Open WAL with recovery callback
- *   3. Replay WAL entries after snapshot_index
+ *   2. Open WAL and scan entries (builds index, does NOT apply to KV)
+ *   3. Set applied_index = snapshot index, logged_index = WAL last index
+ *
+ * IMPORTANT: After open, call storage_mgr_replay_to() with the commit_index
+ * learned from the Raft cluster to apply committed entries to KV.
  *
  * @param cfg    Configuration
  * @param out    Output handle
@@ -82,6 +94,30 @@ int storage_mgr_open(const storage_mgr_config_t *cfg, storage_mgr_t **out);
  * Waits for any in-progress snapshot to complete.
  */
 void storage_mgr_close(storage_mgr_t *mgr);
+
+// ============================================================================
+// Recovery Replay (for Raft integration)
+// ============================================================================
+
+/**
+ * Replay WAL entries to KV store up to commit_index
+ *
+ * Called by Raft layer after recovery once commit_index is known.
+ * Replays entries from (applied_index + 1) to min(commit_index, logged_index).
+ *
+ * This bridges the gap between "what's in WAL" and "what's committed".
+ * Uncommitted entries in WAL are preserved for potential future commit
+ * or truncation by a new leader.
+ *
+ * SAFETY: This must be called before serving any reads to ensure
+ * linearizability. In Hollow Purple, this is guaranteed because all
+ * keys start Invalid after recovery, forcing ALR sync.
+ *
+ * @param mgr          Storage manager
+ * @param commit_index Highest committed index (from Raft)
+ * @return LYGUS_OK on success
+ */
+int storage_mgr_replay_to(storage_mgr_t *mgr, uint64_t commit_index);
 
 // ============================================================================
 // Moment 1: Log Operations (before ACK)

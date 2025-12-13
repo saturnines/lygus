@@ -4,6 +4,12 @@
  * Cross-platform implementation:
  *   - POSIX: Async fork-based snapshots with COW
  *   - Windows: Synchronous snapshots (no fork)
+ *
+ * RECOVERY SEMANTICS (for Raft/Paxos integration):
+ *   - On open: applied_index = snapshot index, logged_index = WAL last index
+ *   - WAL entries are NOT auto-applied to KV during recovery
+ *   - Raft layer calls storage_mgr_replay_to(commit_index) after learning commit state
+ *   - This ensures uncommitted entries don't pollute KV state
  */
 
 #include "storage_mgr.h"
@@ -26,9 +32,9 @@
     #define PATH_SEP "/"
 #endif
 
-// Adjust these includes to match your project structure
+
 #include "../storage/wal/wal.h"
-#include "../storage/wal/block_format.h"  // for WAL_ENTRY_* types
+#include "../storage/wal/block_format.h"
 #include "../storage/snapshot/snapshot.h"
 #include "../state/kv_store.h"
 #include "../public/lygus_errors.h"
@@ -75,17 +81,19 @@ struct storage_mgr {
 };
 
 // ============================================================================
-// Recovery Context (for WAL replay callback)
+// Recovery Context for WAL replay callback
 // ============================================================================
 
 typedef struct {
-    storage_mgr_t *mgr;
-    uint64_t       snapshot_index;  // Skip entries <= this
-    int            error;
+    uint64_t highest_index;
+    uint64_t highest_term;
 } recovery_ctx_t;
 
 /**
- * WAL recovery callback - called for each entry during replay
+ * WAL recovery callback - called for each entry during WAL scan
+ *
+ * Only tracks logged_index/term
+ * Raft layer will call storage_mgr_replay_to() after learning commit_index.
  *
  * Matches wal_entry_callback_t signature from recovery.h:
  *   int (*)(const wal_entry_t *entry, void *user_data)
@@ -93,60 +101,12 @@ typedef struct {
 static int recovery_callback(const wal_entry_t *entry, void *user_data)
 {
     recovery_ctx_t *ctx = (recovery_ctx_t *)user_data;
-    storage_mgr_t *mgr = ctx->mgr;
 
-    uint64_t index = entry->index;
-    uint64_t term = entry->term;
-
-    // Skip entries already in snapshot
-    if (index <= ctx->snapshot_index) {
-        return LYGUS_OK;
+    // Track the highest index/term seen in WAL
+    if (entry->index > ctx->highest_index) {
+        ctx->highest_index = entry->index;
+        ctx->highest_term = entry->term;
     }
-
-    // Enforce ordering
-    if (index != mgr->applied_index + 1) {
-        LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_SNAPSHOT_LOAD,
-                  index, mgr->applied_index, NULL, 0);
-        ctx->error = LYGUS_ERR_CORRUPT;
-        return LYGUS_ERR_CORRUPT;
-    }
-
-    // Apply to KV store based on entry type
-    int ret = LYGUS_OK;
-
-    switch (entry->type) {
-        case WAL_ENTRY_PUT:
-            ret = lygus_kv_put(mgr->kv, entry->key, entry->klen,
-                               entry->val, entry->vlen);
-            break;
-
-        case WAL_ENTRY_DEL:
-            ret = lygus_kv_del(mgr->kv, entry->key, entry->klen);
-            // Key not found is OK during recovery should be idempotent
-            if (ret == LYGUS_ERR_KEY_NOT_FOUND) {
-                ret = LYGUS_OK;
-            }
-            break;
-
-        case WAL_ENTRY_NOOP_SYNC:
-        case WAL_ENTRY_SNAP_MARK:
-            // No KV change
-            break;
-
-        default:
-            LOG_WARN(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
-                     index, term, NULL, 0);
-            break;
-    }
-
-    if (ret != LYGUS_OK) {
-        ctx->error = ret;
-        return ret;
-    }
-
-    // Update applied state
-    mgr->applied_index = index;
-    mgr->applied_term = term;
 
     return LYGUS_OK;
 }
@@ -236,9 +196,7 @@ int storage_mgr_open(const storage_mgr_config_t *cfg, storage_mgr_t **out)
         goto fail;
     }
 
-    // =========================================================================
     // RECOVERY PHASE 1: Load latest snapshot
-    // =========================================================================
 
     uint64_t snapshot_index = 0;
     uint64_t snapshot_term = 0;
@@ -259,6 +217,7 @@ int storage_mgr_open(const storage_mgr_config_t *cfg, storage_mgr_t **out)
             goto fail;
         }
 
+        // applied_index comes from snapshot - this is our starting point
         mgr->applied_index = snapshot_index;
         mgr->applied_term = snapshot_term;
 
@@ -267,22 +226,21 @@ int storage_mgr_open(const storage_mgr_config_t *cfg, storage_mgr_t **out)
 
     } else if (ret == LYGUS_ERR_KEY_NOT_FOUND) {
         // No snapshot, starting fresh
+        mgr->applied_index = 0;
+        mgr->applied_term = 0;
         LOG_INFO_SIMPLE(LYGUS_MODULE_STORAGE, LYGUS_EVENT_INIT, 0, 0);
     } else {
-        // Actual error
+        // throw actual error
         LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_SNAPSHOT_LOAD,
                   0, 0, NULL, 0);
         goto fail;
     }
 
-    // =========================================================================
-    // RECOVERY PHASE 2: Open WAL and replay
-    // =========================================================================
+    // RECOVERY PHASE 2: Open WAL (scan only, don't apply to KV)
 
     recovery_ctx_t recovery_ctx = {
-        .mgr = mgr,
-        .snapshot_index = snapshot_index,
-        .error = LYGUS_OK
+        .highest_index = 0,
+        .highest_term = 0
     };
 
     wal_opts_t wal_opts = {
@@ -302,37 +260,31 @@ int storage_mgr_open(const storage_mgr_config_t *cfg, storage_mgr_t **out)
         goto fail;
     }
 
-    // Check if recovery callback reported errors
-    if (recovery_ctx.error != LYGUS_OK) {
-        LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
-                  mgr->applied_index, mgr->applied_term, NULL, 0);
-        ret = recovery_ctx.error;
-        goto fail;
-    }
-
-    // Update logged state from WAL
+    // logged_index/term comes from WAL scan
     mgr->logged_index = wal_last_index(mgr->wal);
 
-    // Get term from WAL stats (no direct wal_last_term function)
+    // Get term from WAL stats
     wal_stats_t wal_stats;
     if (wal_get_stats(mgr->wal, &wal_stats) == LYGUS_OK) {
         mgr->logged_term = wal_stats.highest_term;
         mgr->wal_bytes_written = wal_stats.bytes_written;
     } else {
-        // Fallback to applied_term
-        mgr->logged_term = mgr->applied_term;
+        mgr->logged_term = recovery_ctx.highest_term;
         mgr->wal_bytes_written = 0;
     }
 
-    // If WAL is ahead of applied (shouldn't happen after full replay),
-    // something is wrong
+    // Normal: logged_index >= applied_index.
+    // If logged_index < applied_index, WAL was purged and snapshot is ahead.
+    // we trust WAL; Raft repairs the gap.
     if (mgr->logged_index < mgr->applied_index) {
         LOG_WARN(LYGUS_MODULE_STORAGE, LYGUS_EVENT_INIT,
                  mgr->applied_index, mgr->logged_index, NULL, 0);
+        // Snapshot is ahead of WAL we can just trust snapshot, WAL was probably purged
+        // logged_index stays at WAL's value, Raft will handle the gap
     }
 
     LOG_INFO_SIMPLE(LYGUS_MODULE_STORAGE, LYGUS_EVENT_INIT,
-             mgr->applied_index, mgr->applied_term);
+             mgr->applied_index, mgr->logged_index);
 
     *out = mgr;
     return LYGUS_OK;
@@ -367,6 +319,103 @@ void storage_mgr_close(storage_mgr_t *mgr)
     free(mgr->wal_dir);
     free(mgr->snapshot_dir);
     free(mgr);
+}
+
+// ============================================================================
+// Replay API
+// ============================================================================
+
+/**
+ * Replay WAL entries to KV store up to commit_index
+ *
+ * Called by Raft layer after recovery once commit_index is known.
+ * Replays entries from (applied_index + 1) to min(commit_index, logged_index).
+ *
+ * @param mgr          Storage manager
+ * @param commit_index Highest committed index (from Raft)
+ * @return LYGUS_OK on success
+ */
+int storage_mgr_replay_to(storage_mgr_t *mgr, uint64_t commit_index)
+{
+    if (!mgr) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // Nothing to replay if already caught up
+    if (mgr->applied_index >= commit_index) {
+        return LYGUS_OK;
+    }
+
+    // Don't replay beyond what's in WAL
+    uint64_t replay_to = commit_index;
+    if (replay_to > mgr->logged_index) {
+        replay_to = mgr->logged_index;
+    }
+
+    // Nothing to replay
+    if (mgr->applied_index >= replay_to) {
+        return LYGUS_OK;
+    }
+
+    LOG_INFO_SIMPLE(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                    mgr->applied_index + 1, replay_to);
+
+    // Replay entries from WAL
+    for (uint64_t idx = mgr->applied_index + 1; idx <= replay_to; idx++) {
+        // Read entry from WAL
+        uint8_t entry_buf[WAL_ENTRY_MAX_KEY_SIZE + WAL_ENTRY_MAX_VALUE_SIZE + 64];
+        wal_entry_t entry;
+
+        int ret = wal_read_entry(mgr->wal, idx, &entry, entry_buf, sizeof(entry_buf));
+        if (ret != LYGUS_OK) {
+            LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                      idx, 0, NULL, 0);
+            return ret;
+        }
+
+        // Apply to KV based on entry type
+        switch (entry.type) {
+            case WAL_ENTRY_PUT:
+                ret = lygus_kv_put(mgr->kv, entry.key, entry.klen,
+                                   entry.val, entry.vlen);
+                break;
+
+            case WAL_ENTRY_DEL:
+                ret = lygus_kv_del(mgr->kv, entry.key, entry.klen);
+                // Key not found is OK (idempotent delete)
+                if (ret == LYGUS_ERR_KEY_NOT_FOUND) {
+                    ret = LYGUS_OK;
+                }
+                break;
+
+            case WAL_ENTRY_NOOP_SYNC:
+            case WAL_ENTRY_SNAP_MARK:
+                // No KV change, just advance index
+                ret = LYGUS_OK;
+                break;
+
+            default:
+                LOG_WARN(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                         idx, entry.term, NULL, 0);
+                ret = LYGUS_OK;
+                break;
+        }
+
+        if (ret != LYGUS_OK) {
+            LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                      idx, entry.term, NULL, 0);
+            return ret;
+        }
+
+        // Update applied state
+        mgr->applied_index = idx;
+        mgr->applied_term = entry.term;
+    }
+
+    LOG_INFO_SIMPLE(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                    mgr->applied_index, mgr->applied_term);
+
+    return LYGUS_OK;
 }
 
 // ============================================================================
@@ -423,7 +472,6 @@ int storage_mgr_log_del(storage_mgr_t *mgr,
     mgr->logged_index = index;
     mgr->logged_term = term;
 
-    // Estimate bytes written
     mgr->wal_bytes_written += 24 + key_len;
 
     return LYGUS_OK;
@@ -449,7 +497,7 @@ int storage_mgr_log_noop(storage_mgr_t *mgr,
     mgr->logged_index = index;
     mgr->logged_term = term;
 
-    // Estimate bytes written (just header, no key/val)
+    // Estimate bytes written (just header no k/v)
     mgr->wal_bytes_written += 20;
 
     return LYGUS_OK;
@@ -501,7 +549,7 @@ int storage_mgr_apply_del(storage_mgr_t *mgr,
     }
 
     int ret = lygus_kv_del(mgr->kv, key, key_len);
-    // Key not found is acceptable (idempotent deletes)
+    // Key not found is acceptable deletes should be idempotent
     if (ret != LYGUS_OK && ret != LYGUS_ERR_KEY_NOT_FOUND) {
         return ret;
     }
@@ -525,7 +573,7 @@ int storage_mgr_apply_noop(storage_mgr_t *mgr,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    // NOOP doesn't modify KV, just advances index
+    // No KV change, just advance index
     mgr->applied_index = index;
     mgr->applied_term = term;
 
@@ -560,7 +608,7 @@ static int snapshot_bookkeeping(storage_mgr_t *mgr,
 {
     int ret;
 
-    // Write SNAP_MARK to WAL (must be durable before purge)
+    // Write SNAP_MARK to WAL durable
     ret = wal_snap_mark(mgr->wal, snap_index, snap_term);
     if (ret != LYGUS_OK) {
         LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_SNAPSHOT_DONE,
