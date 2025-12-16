@@ -1,0 +1,368 @@
+/**
+ * platform_posix.c - POSIX implementation of platform abstraction
+ *
+ * Covers: Linux, macOS, BSD, and other Unix-like systems
+ */
+
+#define _GNU_SOURCE  // For pread/pwrite on some systems
+
+#include "platform.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+#include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/file.h>
+#include <sys/wait.h>
+
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
+
+// ============================================================================
+// File Operations
+// ============================================================================
+
+lygus_fd_t lygus_file_open(const char *path, int flags, int mode) {
+    if (!path) return LYGUS_INVALID_FD;
+
+    int posix_flags = 0;
+
+    // Convert portable flags to POSIX
+    if (flags & LYGUS_O_RDONLY) posix_flags |= O_RDONLY;
+    if (flags & LYGUS_O_WRONLY) posix_flags |= O_WRONLY;
+    if (flags & LYGUS_O_RDWR)   posix_flags |= O_RDWR;
+    if (flags & LYGUS_O_CREAT)  posix_flags |= O_CREAT;
+    if (flags & LYGUS_O_EXCL)   posix_flags |= O_EXCL;
+    if (flags & LYGUS_O_TRUNC)  posix_flags |= O_TRUNC;
+    if (flags & LYGUS_O_APPEND) posix_flags |= O_APPEND;
+
+    return open(path, posix_flags, mode);
+}
+
+int lygus_file_close(lygus_fd_t fd) {
+    if (fd < 0) return -1;
+    return close(fd);
+}
+
+int64_t lygus_file_read(lygus_fd_t fd, void *buf, size_t len) {
+    if (fd < 0 || !buf) return -1;
+    return (int64_t)read(fd, buf, len);
+}
+
+int64_t lygus_file_write(lygus_fd_t fd, const void *buf, size_t len) {
+    if (fd < 0 || !buf) return -1;
+    return (int64_t)write(fd, buf, len);
+}
+
+int64_t lygus_file_pread(lygus_fd_t fd, void *buf, size_t len, uint64_t offset) {
+    if (fd < 0 || !buf) return -1;
+    return (int64_t)pread(fd, buf, len, (off_t)offset);
+}
+
+int64_t lygus_file_pwrite(lygus_fd_t fd, const void *buf, size_t len, uint64_t offset) {
+    if (fd < 0 || !buf) return -1;
+    return (int64_t)pwrite(fd, buf, len, (off_t)offset);
+}
+
+int64_t lygus_file_seek(lygus_fd_t fd, int64_t offset, int whence) {
+    if (fd < 0) return -1;
+
+    int posix_whence;
+    switch (whence) {
+        case LYGUS_SEEK_SET: posix_whence = SEEK_SET; break;
+        case LYGUS_SEEK_CUR: posix_whence = SEEK_CUR; break;
+        case LYGUS_SEEK_END: posix_whence = SEEK_END; break;
+        default: return -1;
+    }
+
+    return (int64_t)lseek(fd, (off_t)offset, posix_whence);
+}
+
+int lygus_file_sync(lygus_fd_t fd) {
+    if (fd < 0) return -1;
+
+    // Use fdatasync if available (syncs data but not necessarily metadata)
+#if defined(_POSIX_SYNCHRONIZED_IO) && _POSIX_SYNCHRONIZED_IO > 0
+    return fdatasync(fd);
+#else
+    return fsync(fd);
+#endif
+}
+
+int lygus_file_truncate(lygus_fd_t fd, uint64_t size) {
+    if (fd < 0) return -1;
+    return ftruncate(fd, (off_t)size);
+}
+
+int lygus_file_lock(lygus_fd_t fd) {
+    if (fd < 0) return -1;
+    // LOCK_NB = non-blocking
+    return flock(fd, LOCK_EX | LOCK_NB);
+}
+
+int lygus_file_unlock(lygus_fd_t fd) {
+    if (fd < 0) return -1;
+    return flock(fd, LOCK_UN);
+}
+
+int64_t lygus_file_size(lygus_fd_t fd) {
+    if (fd < 0) return -1;
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        return -1;
+    }
+    return (int64_t)st.st_size;
+}
+
+// ============================================================================
+// Filesystem Operations
+// ============================================================================
+
+int lygus_mkdir(const char *path) {
+    if (!path) return -1;
+
+    int ret = mkdir(path, 0755);
+    if (ret < 0 && errno == EEXIST) {
+        return 0;  // Directory already exists is OK
+    }
+    return ret;
+}
+
+int lygus_unlink(const char *path) {
+    if (!path) return -1;
+    return unlink(path);
+}
+
+int lygus_rename(const char *old_path, const char *new_path) {
+    if (!old_path || !new_path) return -1;
+    return rename(old_path, new_path);
+}
+
+int lygus_path_exists(const char *path) {
+    if (!path) return 0;
+    return access(path, F_OK) == 0;
+}
+
+// ============================================================================
+// Directory Iteration
+// ============================================================================
+
+struct lygus_dir {
+    DIR *dir;
+    struct dirent *entry;
+};
+
+lygus_dir_t* lygus_dir_open(const char *path) {
+    if (!path) return NULL;
+
+    DIR *d = opendir(path);
+    if (!d) return NULL;
+
+    lygus_dir_t *dir = malloc(sizeof(lygus_dir_t));
+    if (!dir) {
+        closedir(d);
+        return NULL;
+    }
+
+    dir->dir = d;
+    dir->entry = NULL;
+    return dir;
+}
+
+const char* lygus_dir_read(lygus_dir_t *dir) {
+    if (!dir || !dir->dir) return NULL;
+
+    while ((dir->entry = readdir(dir->dir)) != NULL) {
+        // Skip . and ..
+        if (dir->entry->d_name[0] == '.') {
+            if (dir->entry->d_name[1] == '\0') continue;
+            if (dir->entry->d_name[1] == '.' && dir->entry->d_name[2] == '\0') continue;
+        }
+        return dir->entry->d_name;
+    }
+
+    return NULL;
+}
+
+void lygus_dir_close(lygus_dir_t *dir) {
+    if (!dir) return;
+    if (dir->dir) {
+        closedir(dir->dir);
+    }
+    free(dir);
+}
+
+// ============================================================================
+// Path Utilities
+// ============================================================================
+
+const char* lygus_path_separator(void) {
+    return "/";
+}
+
+int lygus_path_join(char *out, size_t out_len, const char *dir, const char *file) {
+    if (!out || !dir || !file || out_len == 0) return -1;
+
+    int n = snprintf(out, out_len, "%s/%s", dir, file);
+    if (n < 0 || (size_t)n >= out_len) {
+        return -1;
+    }
+    return 0;
+}
+
+// ============================================================================
+// Async Process (fork based)
+// ============================================================================
+
+struct lygus_async_proc {
+    pid_t pid;
+    int   completed;
+    int   success;
+};
+
+int lygus_async_fork_supported(void) {
+    return 1;  // POSIX supports fork
+}
+
+lygus_async_proc_t* lygus_async_fork(int (*func)(void *ctx), void *ctx, int *is_child) {
+    if (!func || !is_child) return NULL;
+
+    *is_child = 0;
+
+    pid_t pid = fork();
+
+    if (pid < 0) {
+        // Fork failed
+        return NULL;
+    }
+
+    if (pid == 0) {
+        // Child process
+        *is_child = 1;
+        int ret = func(ctx);
+        _exit(ret == 0 ? 0 : 1);
+        // Never returns
+    }
+
+    // Parent process
+    lygus_async_proc_t *proc = malloc(sizeof(lygus_async_proc_t));
+    if (!proc) {
+        // Can't track child, but it's already forked... not much we can do
+        return NULL;
+    }
+
+    proc->pid = pid;
+    proc->completed = 0;
+    proc->success = 0;
+
+    return proc;
+}
+
+int lygus_async_poll(lygus_async_proc_t *proc, int *done, int *success) {
+    if (!proc || !done || !success) return -1;
+
+    if (proc->completed) {
+        *done = 1;
+        *success = proc->success;
+        return 0;
+    }
+
+    int status;
+    pid_t result = waitpid(proc->pid, &status, WNOHANG);
+
+    if (result == 0) {
+        // Still running
+        *done = 0;
+        *success = 0;
+        return 0;
+    }
+
+    if (result < 0) {
+        return -1;
+    }
+
+    // Child finished
+    proc->completed = 1;
+    proc->success = (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
+
+    *done = 1;
+    *success = proc->success;
+    return 0;
+}
+
+int lygus_async_wait(lygus_async_proc_t *proc, int *success) {
+    if (!proc || !success) return -1;
+
+    if (proc->completed) {
+        *success = proc->success;
+        return 0;
+    }
+
+    int status;
+    pid_t result = waitpid(proc->pid, &status, 0);
+
+    if (result < 0) {
+        return -1;
+    }
+
+    proc->completed = 1;
+    proc->success = (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
+
+    *success = proc->success;
+    return 0;
+}
+
+void lygus_async_free(lygus_async_proc_t *proc) {
+    free(proc);  // free(NULL) is safe
+}
+
+// ============================================================================
+// Threading Utilities
+// ============================================================================
+
+uint32_t lygus_thread_id(void) {
+#ifdef __linux__
+    return (uint32_t)syscall(SYS_gettid);
+#elif defined(__APPLE__)
+    uint64_t tid;
+    pthread_threadid_np(NULL, &tid);
+    return (uint32_t)tid;
+#else
+    return (uint32_t)(uintptr_t)pthread_self();
+#endif
+}
+
+void lygus_sleep_us(uint64_t us) {
+    usleep((useconds_t)us);
+}
+
+// ============================================================================
+// Time Utilities
+// ============================================================================
+
+uint64_t lygus_monotonic_ns(void) {
+    struct timespec ts;
+
+#ifdef CLOCK_MONOTONIC
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts);
+#endif
+
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t lygus_realtime_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
