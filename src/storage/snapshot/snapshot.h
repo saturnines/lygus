@@ -4,11 +4,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#ifndef _WIN32
-    #include <sys/types.h>
-#endif
-
-// Use paths relative to src/ (added via -I flag)
 #include "state/kv_store.h"
 #include "public/lygus_errors.h"
 
@@ -52,32 +47,30 @@ extern "C" {
 #endif
 
 // ============================================================================
-// Async Snapshot State
-// Platform-specific: Unix uses fork(), Windows uses synchronous fallback
+// Async Snapshot State (unified - no platform #ifdefs)
 // ============================================================================
 
+// Forward declarations for opaque platform types
+typedef struct lygus_async_proc lygus_async_proc_t;
+
 typedef struct {
-#ifdef _WIN32
-    int      completed;    // 1 if done (Windows: always immediate)
-    int      success;      // 1 if succeeded
-#else
-    pid_t    pid;          // Child process ID (0 if none)
-#endif
-    uint64_t index;        // Snapshot index
-    uint64_t term;         // Snapshot term
-    char     path[256];    // Path to snapshot file
+    lygus_async_proc_t *proc;   // Platform async handle
+    void               *ctx;    // Worker context (freed on cleanup)
+    uint64_t            index;  // Snapshot index
+    uint64_t            term;   // Snapshot term
+    char                path[256];  // Path to snapshot file
 } snapshot_async_t;
 
 // ============================================================================
-// Snapshot Write (called from child process after fork)
+// Snapshot Write (called from child process after fork, or inline on Windows)
 // ============================================================================
 
 /**
  * Write KV state to snapshot file
  *
  * Serializes all KV entries to disk with header and CRC footer.
- * This should be called from a forked child process to avoid
- * blocking the parent.
+ * On POSIX, this is called from a forked child process to avoid
+ * blocking the parent. On Windows, called inline (blocking).
  *
  * File format:
  *   [header 32 bytes]
@@ -162,20 +155,21 @@ int snapshot_read_header(const char *path,
                          uint64_t *out_count);
 
 // ============================================================================
-// Async Snapshot (fork on Unix, synchronous on Windows)
+// Async Snapshot (fork on POSIX, synchronous on Windows)
 // ============================================================================
 
 /**
  * Create snapshot asynchronously
  *
- * On Unix: Forks a child process that writes the snapshot. Parent returns
+ * On POSIX: Forks a child process that writes the snapshot. Parent returns
  * immediately and can continue serving requests. Child process sees
  * copy-on-write memory, so it has a consistent view of KV state.
  *
  * On Windows: Falls back to synchronous write (blocks until complete).
- * The API remains the same, but out_async->completed will be 1 immediately.
+ * The API remains the same for both platforms.
  *
  * Call snapshot_poll() or snapshot_wait() to check completion status.
+ * Call snapshot_async_cleanup() when done to free resources.
  *
  * @param kv          KV store to snapshot
  * @param last_index  Raft index this snapshot covers
@@ -186,7 +180,8 @@ int snapshot_read_header(const char *path,
  *
  * Errors:
  *   LYGUS_ERR_INVALID_ARG  - NULL pointers
- *   LYGUS_ERR_INTERNAL     - fork() failed (Unix only)
+ *   LYGUS_ERR_NOMEM        - Failed to allocate context
+ *   LYGUS_ERR_INTERNAL     - fork() failed (POSIX only)
  */
 int snapshot_create_async(lygus_kv_t *kv,
                           uint64_t last_index,
@@ -203,7 +198,7 @@ int snapshot_create_async(lygus_kv_t *kv,
  * @return            LYGUS_OK, or negative error code
  *
  * Errors:
- *   LYGUS_ERR_INVALID_ARG  - NULL async or async->pid == 0
+ *   LYGUS_ERR_INVALID_ARG  - NULL async or proc not initialized
  */
 int snapshot_poll(snapshot_async_t *async,
                   int *out_done,
@@ -219,6 +214,16 @@ int snapshot_poll(snapshot_async_t *async,
 int snapshot_wait(snapshot_async_t *async,
                   int *out_success);
 
+/**
+ * Cleanup async snapshot resources
+ *
+ * Frees the async process handle and worker context.
+ * Safe to call multiple times or with NULL.
+ *
+ * @param async  Async state to cleanup
+ */
+void snapshot_async_cleanup(snapshot_async_t *async);
+
 // ============================================================================
 // Snapshot Directory Management
 // ============================================================================
@@ -226,7 +231,7 @@ int snapshot_wait(snapshot_async_t *async,
 /**
  * Generate snapshot filename from index and term
  *
- * Format: snap-{index:016x}-{term:016x}.dat
+ * Format: {dir}/snap-{index:016x}-{term:016x}.dat
  *
  * @param dir       Directory path
  * @param index     Raft index

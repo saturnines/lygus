@@ -1,4 +1,5 @@
 #include "snapshot.h"
+#include "platform/platform.h"
 #include "util/varint.h"
 #include "util/crc32c.h"
 #include "util/logging.h"
@@ -6,32 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-
-#ifdef _WIN32
-    #include <windows.h>
-    #include <io.h>
-    #include <direct.h>
-    #define O_BINARY _O_BINARY
-    #define open _open
-    #define close _close
-    #define read _read
-    #define write _write
-    #define fsync(fd) _commit(fd)
-    #define unlink(path) _unlink(path)
-    // MinGW defines ssize_t in corecrt.h, MSVC doesn't
-    #ifdef _MSC_VER
-        typedef int ssize_t;
-    #endif
-#else
-    #include <unistd.h>
-    #include <sys/wait.h>
-    #include <dirent.h>
-    #define O_BINARY 0
-#endif
+#include <inttypes.h>
 
 // ============================================================================
 // Internal Helpers
@@ -40,18 +16,20 @@
 /**
  * Write all bytes to fd (handles partial writes)
  */
-static int write_all(int fd, const void *buf, size_t len) {
+static int write_all(lygus_fd_t fd, const void *buf, size_t len) {
     const uint8_t *p = (const uint8_t *)buf;
     size_t remaining = len;
 
     while (remaining > 0) {
-        ssize_t n = write(fd, p, (unsigned int)remaining);
+        int64_t n = lygus_file_write(fd, p, remaining);
         if (n < 0) {
-            if (errno == EINTR) continue;
             return -1;
         }
+        if (n == 0) {
+            return -1;  // Can't make progress
+        }
         p += n;
-        remaining -= n;
+        remaining -= (size_t)n;
     }
 
     return 0;
@@ -60,21 +38,20 @@ static int write_all(int fd, const void *buf, size_t len) {
 /**
  * Read all bytes from fd (handles partial reads)
  */
-static int read_all(int fd, void *buf, size_t len) {
+static int read_all(lygus_fd_t fd, void *buf, size_t len) {
     uint8_t *p = (uint8_t *)buf;
     size_t remaining = len;
 
     while (remaining > 0) {
-        ssize_t n = read(fd, p, (unsigned int)remaining);
+        int64_t n = lygus_file_read(fd, p, remaining);
         if (n < 0) {
-            if (errno == EINTR) continue;
             return -1;
         }
         if (n == 0) {
             return -1;  // Unexpected EOF
         }
         p += n;
-        remaining -= n;
+        remaining -= (size_t)n;
     }
 
     return 0;
@@ -98,8 +75,10 @@ int snapshot_write(lygus_kv_t *kv,
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
 
     // Create temp file
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
-    if (fd < 0) {
+    lygus_fd_t fd = lygus_file_open(tmp_path,
+                                    LYGUS_O_WRONLY | LYGUS_O_CREAT | LYGUS_O_TRUNC,
+                                    0644);
+    if (fd == LYGUS_INVALID_FD) {
         return LYGUS_ERR_OPEN_FILE;
     }
 
@@ -181,20 +160,16 @@ int snapshot_write(lygus_kv_t *kv,
     }
 
     // Fsync before rename
-    if (fsync(fd) < 0) {
+    if (lygus_file_sync(fd) < 0) {
         ret = LYGUS_ERR_FSYNC;
         goto cleanup;
     }
 
-    close(fd);
-    fd = -1;
+    lygus_file_close(fd);
+    fd = LYGUS_INVALID_FD;
 
-    // Atomic rename (on Windows, need to delete target first if exists)
-#ifdef _WIN32
-    // Windows rename fails if target exists
-    unlink(path);
-#endif
-    if (rename(tmp_path, path) < 0) {
+    // Atomic rename (platform layer handles Windows quirks)
+    if (lygus_rename(tmp_path, path) < 0) {
         ret = LYGUS_ERR_IO;
         goto cleanup;
     }
@@ -205,10 +180,10 @@ int snapshot_write(lygus_kv_t *kv,
     return LYGUS_OK;
 
 cleanup:
-    if (fd >= 0) {
-        close(fd);
+    if (fd != LYGUS_INVALID_FD) {
+        lygus_file_close(fd);
     }
-    unlink(tmp_path);
+    lygus_unlink(tmp_path);
     return ret;
 }
 
@@ -225,8 +200,8 @@ int snapshot_load(const char *path,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    int fd = open(path, O_RDONLY | O_BINARY);
-    if (fd < 0) {
+    lygus_fd_t fd = lygus_file_open(path, LYGUS_O_RDONLY, 0);
+    if (fd == LYGUS_INVALID_FD) {
         return LYGUS_ERR_OPEN_FILE;
     }
 
@@ -257,7 +232,6 @@ int snapshot_load(const char *path,
     // Read entries
     for (uint64_t i = 0; i < hdr.entry_count; i++) {
         // Read varints for klen and vlen
-        // We need to read byte-by-byte for varints
         uint8_t varint_buf[VARINT_MAX_BYTES];
         uint64_t klen = 0, vlen = 0;
 
@@ -362,7 +336,6 @@ int snapshot_load(const char *path,
     crc ^= 0xFFFFFFFF;
 
     if (stored_crc != crc) {
-        // CRC mismatch - clear KV and return error
         lygus_kv_clear(kv);
         ret = LYGUS_ERR_CORRUPT;
         goto cleanup;
@@ -375,14 +348,12 @@ int snapshot_load(const char *path,
     LOG_INFO_SIMPLE(LYGUS_MODULE_SNAPSHOT, LYGUS_EVENT_SNAPSHOT_LOAD,
                     hdr.last_term, hdr.last_index);
 
-    close(fd);
+    lygus_file_close(fd);
     return LYGUS_OK;
 
 cleanup:
-    // On ANY error after we started loading, clear the KV to avoid
-    // leaving it in a partial/dirty state
     lygus_kv_clear(kv);
-    close(fd);
+    lygus_file_close(fd);
     return ret;
 }
 
@@ -399,8 +370,8 @@ int snapshot_read_header(const char *path,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    int fd = open(path, O_RDONLY | O_BINARY);
-    if (fd < 0) {
+    lygus_fd_t fd = lygus_file_open(path, LYGUS_O_RDONLY, 0);
+    if (fd == LYGUS_INVALID_FD) {
         return LYGUS_ERR_OPEN_FILE;
     }
 
@@ -427,76 +398,32 @@ int snapshot_read_header(const char *path,
     if (out_count) *out_count = hdr.entry_count;
 
 cleanup:
-    close(fd);
+    lygus_file_close(fd);
     return ret;
 }
 
 // ============================================================================
-// Async Snapshot
-// On Unix: uses fork() for COW semantics (non-blocking)
-// On Windows: falls back to synchronous write (blocking, but still works)
+// Async Snapshot (unified implementation using platform layer)
 // ============================================================================
 
-#ifdef _WIN32
+/**
+ * Context passed to the forked snapshot worker
+ */
+typedef struct {
+    lygus_kv_t *kv;
+    uint64_t    last_index;
+    uint64_t    last_term;
+    char        path[256];
+} snapshot_worker_ctx_t;
 
-// Windows: synchronous fallback (no fork available)
-int snapshot_create_async(lygus_kv_t *kv,
-                          uint64_t last_index,
-                          uint64_t last_term,
-                          const char *path,
-                          snapshot_async_t *out_async)
-{
-    if (!kv || !path || !out_async) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
-
-    LOG_INFO_SIMPLE(LYGUS_MODULE_SNAPSHOT, LYGUS_EVENT_SNAPSHOT_START,
-                    last_term, last_index);
-
-    // On Windows, we do a synchronous write
-    // This blocks but maintains correctness
-    int ret = snapshot_write(kv, last_index, last_term, path);
-
-    // Mark as "already complete"
-    out_async->completed = 1;
-    out_async->success = (ret == LYGUS_OK) ? 1 : 0;
-    out_async->index = last_index;
-    out_async->term = last_term;
-    strncpy(out_async->path, path, sizeof(out_async->path) - 1);
-    out_async->path[sizeof(out_async->path) - 1] = '\0';
-
-    return LYGUS_OK;
+/**
+ * Worker function that runs in forked child (POSIX) or inline (Windows)
+ */
+static int snapshot_worker(void *ctx) {
+    snapshot_worker_ctx_t *sctx = (snapshot_worker_ctx_t *)ctx;
+    int ret = snapshot_write(sctx->kv, sctx->last_index, sctx->last_term, sctx->path);
+    return (ret == LYGUS_OK) ? 0 : 1;
 }
-
-int snapshot_poll(snapshot_async_t *async,
-                  int *out_done,
-                  int *out_success)
-{
-    if (!async || !out_done || !out_success) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
-
-    // On Windows, always complete immediately
-    *out_done = async->completed;
-    *out_success = async->success;
-
-    return LYGUS_OK;
-}
-
-int snapshot_wait(snapshot_async_t *async,
-                  int *out_success)
-{
-    if (!async || !out_success) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
-
-    // On Windows, already complete
-    *out_success = async->success;
-
-    return LYGUS_OK;
-}
-
-#else  // Unix
 
 int snapshot_create_async(lygus_kv_t *kv,
                           uint64_t last_index,
@@ -511,21 +438,37 @@ int snapshot_create_async(lygus_kv_t *kv,
     LOG_INFO_SIMPLE(LYGUS_MODULE_SNAPSHOT, LYGUS_EVENT_SNAPSHOT_START,
                     last_term, last_index);
 
-    pid_t pid = fork();
+    // Prepare context for worker
+    snapshot_worker_ctx_t *ctx = malloc(sizeof(snapshot_worker_ctx_t));
+    if (!ctx) {
+        return LYGUS_ERR_NOMEM;
+    }
 
-    if (pid < 0) {
-        // Fork failed
+    ctx->kv = kv;
+    ctx->last_index = last_index;
+    ctx->last_term = last_term;
+    strncpy(ctx->path, path, sizeof(ctx->path) - 1);
+    ctx->path[sizeof(ctx->path) - 1] = '\0';
+
+    // Fork (or run synchronously on Windows)
+    int is_child = 0;
+    lygus_async_proc_t *proc = lygus_async_fork(snapshot_worker, ctx, &is_child);
+
+    if (is_child) {
+        // This only happens on POSIX, and lygus_async_fork already called _exit()
+        // We never reach here, but just in case:
+        free(ctx);
+        _exit(1);
+    }
+
+    if (!proc) {
+        free(ctx);
         return LYGUS_ERR_INTERNAL;
     }
 
-    if (pid == 0) {
-        // Child process - has COW copy of address space
-        int ret = snapshot_write(kv, last_index, last_term, path);
-        _exit(ret == LYGUS_OK ? 0 : 1);
-    }
-
-    // Parent process - store async state
-    out_async->pid = pid;
+    // Store async state
+    out_async->proc = proc;
+    out_async->ctx = ctx;
     out_async->index = last_index;
     out_async->term = last_term;
     strncpy(out_async->path, path, sizeof(out_async->path) - 1);
@@ -533,6 +476,14 @@ int snapshot_create_async(lygus_kv_t *kv,
 
     return LYGUS_OK;
 }
+
+// Maybe..
+int snapshot_wait_and_cleanup(snapshot_async_t *a, int *ok) {
+    int r = snapshot_wait(a, ok);
+    snapshot_async_cleanup(a);
+    return r;
+}
+
 
 int snapshot_poll(snapshot_async_t *async,
                   int *out_done,
@@ -542,33 +493,11 @@ int snapshot_poll(snapshot_async_t *async,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    if (async->pid == 0) {
+    if (!async->proc) {
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    int status;
-    pid_t result = waitpid(async->pid, &status, WNOHANG);
-
-    if (result == 0) {
-        // Still running
-        *out_done = 0;
-        *out_success = 0;
-        return LYGUS_OK;
-    }
-
-    if (result < 0) {
-        // Error
-        return LYGUS_ERR_INTERNAL;
-    }
-
-    // Child finished
-    *out_done = 1;
-    *out_success = (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
-
-    // Clear pid so we don't wait again
-    async->pid = 0;
-
-    return LYGUS_OK;
+    return lygus_async_poll(async->proc, out_done, out_success);
 }
 
 int snapshot_wait(snapshot_async_t *async,
@@ -578,26 +507,27 @@ int snapshot_wait(snapshot_async_t *async,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    if (async->pid == 0) {
+    if (!async->proc) {
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    int status;
-    pid_t result = waitpid(async->pid, &status, 0);
-
-    if (result < 0) {
-        return LYGUS_ERR_INTERNAL;
-    }
-
-    *out_success = (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
-
-    // Clear pid
-    async->pid = 0;
-
-    return LYGUS_OK;
+    return lygus_async_wait(async->proc, out_success);
 }
 
-#endif  // _WIN32
+void snapshot_async_cleanup(snapshot_async_t *async)
+{
+    if (!async) return;
+
+    if (async->proc) {
+        lygus_async_free(async->proc);
+        async->proc = NULL;
+    }
+
+    if (async->ctx) {
+        free(async->ctx);
+        async->ctx = NULL;
+    }
+}
 
 // ============================================================================
 // Snapshot Path Management
@@ -613,19 +543,13 @@ int snapshot_path_from_index(const char *dir,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-#ifdef _WIN32
-    int n = snprintf(out, out_len, "%s\\snap-%016llx-%016llx.dat",
-                     dir,
-                     (unsigned long long)index,
-                     (unsigned long long)term);
-#else
-    int n = snprintf(out, out_len, "%s/snap-%016llx-%016llx.dat",
-                     dir,
-                     (unsigned long long)index,
-                     (unsigned long long)term);
-#endif
+    // Build filename
+    char filename[128];
+    snprintf(filename, sizeof(filename), "snap-%016" PRIx64 "-%016" PRIx64 ".dat",
+             index, term);
 
-    if (n < 0 || (size_t)n >= out_len) {
+    // Join with directory
+    if (lygus_path_join(out, out_len, dir, filename) < 0) {
         return LYGUS_ERR_INVALID_ARG;
     }
 
@@ -633,10 +557,8 @@ int snapshot_path_from_index(const char *dir,
 }
 
 // ============================================================================
-// Directory Scanning (platform-specific)
+// Directory Scanning (unified implementation)
 // ============================================================================
-
-#ifdef _WIN32
 
 int snapshot_find_latest(const char *dir,
                          char *out_path,
@@ -647,150 +569,7 @@ int snapshot_find_latest(const char *dir,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    char pattern[512];
-    snprintf(pattern, sizeof(pattern), "%s\\snap-*.dat", dir);
-
-    WIN32_FIND_DATAA ffd;
-    HANDLE hFind = FindFirstFileA(pattern, &ffd);
-
-    if (hFind == INVALID_HANDLE_VALUE) {
-        return LYGUS_ERR_KEY_NOT_FOUND;
-    }
-
-    uint64_t best_index = 0;
-    uint64_t best_term = 0;
-    char best_name[256] = {0};
-
-    do {
-        if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            uint64_t index, term;
-            if (sscanf(ffd.cFileName, "snap-%llx-%llx.dat",
-                       (unsigned long long *)&index,
-                       (unsigned long long *)&term) == 2) {
-                if (index > best_index ||
-                    (index == best_index && term > best_term)) {
-                    best_index = index;
-                    best_term = term;
-                    strncpy(best_name, ffd.cFileName, sizeof(best_name) - 1);
-                }
-            }
-        }
-    } while (FindNextFileA(hFind, &ffd) != 0);
-
-    FindClose(hFind);
-
-    if (best_name[0] == '\0') {
-        return LYGUS_ERR_KEY_NOT_FOUND;
-    }
-
-    snprintf(out_path, 256, "%s\\%s", dir, best_name);
-
-    if (out_index) *out_index = best_index;
-    if (out_term) *out_term = best_term;
-
-    return LYGUS_OK;
-}
-
-int snapshot_purge_old(const char *dir, int keep)
-{
-    if (!dir || keep < 0) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
-
-    char pattern[512];
-    snprintf(pattern, sizeof(pattern), "%s\\snap-*.dat", dir);
-
-    WIN32_FIND_DATAA ffd;
-    HANDLE hFind = FindFirstFileA(pattern, &ffd);
-
-    if (hFind == INVALID_HANDLE_VALUE) {
-        return LYGUS_OK;  // No snapshots
-    }
-
-    // First pass: count snapshots
-    int count = 0;
-    do {
-        if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            uint64_t index, term;
-            if (sscanf(ffd.cFileName, "snap-%llx-%llx.dat",
-                       (unsigned long long *)&index,
-                       (unsigned long long *)&term) == 2) {
-                count++;
-            }
-        }
-    } while (FindNextFileA(hFind, &ffd) != 0);
-
-    FindClose(hFind);
-
-    if (count <= keep) {
-        return LYGUS_OK;
-    }
-
-    // Second pass: collect snapshots
-    typedef struct {
-        uint64_t index;
-        uint64_t term;
-        char name[256];
-    } snap_info_t;
-
-    snap_info_t *snaps = malloc(count * sizeof(snap_info_t));
-    if (!snaps) {
-        return LYGUS_ERR_NOMEM;
-    }
-
-    hFind = FindFirstFileA(pattern, &ffd);
-    int idx = 0;
-
-    do {
-        if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            uint64_t index, term;
-            if (sscanf(ffd.cFileName, "snap-%llx-%llx.dat",
-                       (unsigned long long *)&index,
-                       (unsigned long long *)&term) == 2) {
-                snaps[idx].index = index;
-                snaps[idx].term = term;
-                strncpy(snaps[idx].name, ffd.cFileName, sizeof(snaps[idx].name) - 1);
-                idx++;
-            }
-        }
-    } while (FindNextFileA(hFind, &ffd) != 0 && idx < count);
-
-    FindClose(hFind);
-
-    // Sort by index descending
-    for (int i = 0; i < idx - 1; i++) {
-        for (int j = 0; j < idx - i - 1; j++) {
-            if (snaps[j].index < snaps[j + 1].index) {
-                snap_info_t tmp = snaps[j];
-                snaps[j] = snaps[j + 1];
-                snaps[j + 1] = tmp;
-            }
-        }
-    }
-
-    // Delete all but first 'keep'
-    for (int i = keep; i < idx; i++) {
-        char path[512];
-        snprintf(path, sizeof(path), "%s\\%s", dir, snaps[i].name);
-        unlink(path);
-    }
-
-    free(snaps);
-    return LYGUS_OK;
-}
-
-#else  // Unix
-
-int snapshot_find_latest(const char *dir,
-                         char *out_path,
-                         uint64_t *out_index,
-                         uint64_t *out_term)
-{
-    if (!dir || !out_path) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
-
-    DIR *d = opendir(dir);
+    lygus_dir_t *d = lygus_dir_open(dir);
     if (!d) {
         return LYGUS_ERR_IO;
     }
@@ -799,31 +578,30 @@ int snapshot_find_latest(const char *dir,
     uint64_t best_term = 0;
     char best_name[256] = {0};
 
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL) {
+    const char *name;
+    while ((name = lygus_dir_read(d)) != NULL) {
         uint64_t index, term;
 
         // Parse snap-{index}-{term}.dat
-        if (sscanf(entry->d_name, "snap-%llx-%llx.dat",
-                   (unsigned long long *)&index,
-                   (unsigned long long *)&term) == 2) {
+        if (sscanf(name, "snap-%" SCNx64 "-%" SCNx64 ".dat",
+                   &index, &term) == 2) {
             // Higher index wins, or same index with higher term
             if (index > best_index ||
                 (index == best_index && term > best_term)) {
                 best_index = index;
                 best_term = term;
-                strncpy(best_name, entry->d_name, sizeof(best_name) - 1);
+                strncpy(best_name, name, sizeof(best_name) - 1);
             }
         }
     }
 
-    closedir(d);
+    lygus_dir_close(d);
 
     if (best_name[0] == '\0') {
         return LYGUS_ERR_KEY_NOT_FOUND;
     }
 
-    snprintf(out_path, 256, "%s/%s", dir, best_name);
+    lygus_path_join(out_path, 256, dir, best_name);
 
     if (out_index) *out_index = best_index;
     if (out_term) *out_term = best_term;
@@ -837,30 +615,33 @@ int snapshot_purge_old(const char *dir, int keep)
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    DIR *d = opendir(dir);
+    lygus_dir_t *d = lygus_dir_open(dir);
     if (!d) {
         return LYGUS_ERR_IO;
     }
 
-    // Count snapshots first
+    // First pass: count snapshots
     int count = 0;
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL) {
+    const char *name;
+    while ((name = lygus_dir_read(d)) != NULL) {
         uint64_t index, term;
-        if (sscanf(entry->d_name, "snap-%llx-%llx.dat",
-                   (unsigned long long *)&index,
-                   (unsigned long long *)&term) == 2) {
+        if (sscanf(name, "snap-%" SCNx64 "-%" SCNx64 ".dat",
+                   &index, &term) == 2) {
             count++;
         }
     }
 
     if (count <= keep) {
-        closedir(d);
+        lygus_dir_close(d);
         return LYGUS_OK;  // Nothing to purge
     }
 
-    // Collect all snapshots
-    rewinddir(d);
+    // Collect all snapshots (reopen dir to restart iteration)
+    lygus_dir_close(d);
+    d = lygus_dir_open(dir);
+    if (!d) {
+        return LYGUS_ERR_IO;
+    }
 
     typedef struct {
         uint64_t index;
@@ -868,26 +649,25 @@ int snapshot_purge_old(const char *dir, int keep)
         char name[256];
     } snap_info_t;
 
-    snap_info_t *snaps = malloc(count * sizeof(snap_info_t));
+    snap_info_t *snaps = malloc((size_t)count * sizeof(snap_info_t));
     if (!snaps) {
-        closedir(d);
+        lygus_dir_close(d);
         return LYGUS_ERR_NOMEM;
     }
 
     int idx = 0;
-    while ((entry = readdir(d)) != NULL && idx < count) {
+    while ((name = lygus_dir_read(d)) != NULL && idx < count) {
         uint64_t index, term;
-        if (sscanf(entry->d_name, "snap-%llx-%llx.dat",
-                   (unsigned long long *)&index,
-                   (unsigned long long *)&term) == 2) {
+        if (sscanf(name, "snap-%" SCNx64 "-%" SCNx64 ".dat",
+                   &index, &term) == 2) {
             snaps[idx].index = index;
             snaps[idx].term = term;
-            strncpy(snaps[idx].name, entry->d_name, sizeof(snaps[idx].name) - 1);
+            strncpy(snaps[idx].name, name, sizeof(snaps[idx].name) - 1);
             idx++;
         }
     }
 
-    closedir(d);
+    lygus_dir_close(d);
 
     // Sort by index descending (simple bubble sort, count is small)
     for (int i = 0; i < idx - 1; i++) {
@@ -903,12 +683,10 @@ int snapshot_purge_old(const char *dir, int keep)
     // Delete all but the first 'keep' snapshots
     for (int i = keep; i < idx; i++) {
         char path[512];
-        snprintf(path, sizeof(path), "%s/%s", dir, snaps[i].name);
-        unlink(path);
+        lygus_path_join(path, sizeof(path), dir, snaps[i].name);
+        lygus_unlink(path);
     }
 
     free(snaps);
     return LYGUS_OK;
 }
-
-#endif  // _WIN32
