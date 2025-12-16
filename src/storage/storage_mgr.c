@@ -547,6 +547,88 @@ ssize_t storage_mgr_get(storage_mgr_t *mgr,
     return lygus_kv_get(mgr->kv, key, key_len, val_out, val_cap);
 }
 
+/**
+ * Replay WAL entries from current applied_index up to target_index
+ * Used for catching up after a restart or lag
+ */
+int storage_mgr_replay_to(storage_mgr_t *mgr, uint64_t target_index)
+{
+    if (!mgr) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // Already at or past target
+    if (mgr->applied_index >= target_index) {
+        return LYGUS_OK;
+    }
+
+    // Can't replay beyond what's logged
+    if (target_index > mgr->logged_index) {
+        LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                  target_index, mgr->logged_index, NULL, 0);
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    LOG_INFO_SIMPLE(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+             mgr->applied_index, target_index);
+
+    // Read and apply entries sequentially
+    for (uint64_t idx = mgr->applied_index + 1; idx <= target_index; idx++) {
+        // Read entry from WAL
+        uint8_t buf[WAL_BLOCK_SIZE];
+        wal_entry_t entry;
+
+        int ret = wal_read_entry(mgr->wal, idx, &entry, buf, sizeof(buf));
+        if (ret != LYGUS_OK) {
+            LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                      idx, mgr->applied_index, NULL, 0);
+            return ret;
+        }
+
+        // Apply based on type
+        switch (entry.type) {
+            case WAL_ENTRY_PUT:
+                ret = lygus_kv_put(mgr->kv, entry.key, entry.klen,
+                                   entry.val, entry.vlen);
+                break;
+
+            case WAL_ENTRY_DEL:
+                ret = lygus_kv_del(mgr->kv, entry.key, entry.klen);
+                if (ret == LYGUS_ERR_KEY_NOT_FOUND) {
+                    ret = LYGUS_OK;  // Idempotent
+                }
+                break;
+
+            case WAL_ENTRY_NOOP_SYNC:
+            case WAL_ENTRY_SNAP_MARK:
+                // No KV operation
+                ret = LYGUS_OK;
+                break;
+
+            default:
+                LOG_WARN(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                         idx, entry.type, NULL, 0);
+                ret = LYGUS_OK;
+                break;
+        }
+
+        if (ret != LYGUS_OK) {
+            LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+                      idx, mgr->applied_index, NULL, 0);
+            return ret;
+        }
+
+        // Update applied state
+        mgr->applied_index = idx;
+        mgr->applied_term = entry.term;
+    }
+
+    LOG_INFO_SIMPLE(LYGUS_MODULE_STORAGE, LYGUS_EVENT_WAL_RECOVERY,
+             mgr->applied_index, mgr->applied_term);
+
+    return LYGUS_OK;
+}
+
 // ============================================================================
 // Snapshot Operations - Platform Specific
 // ============================================================================

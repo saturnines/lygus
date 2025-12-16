@@ -272,6 +272,11 @@ int storage_mgr_snapshot_in_progress(const storage_mgr_t *mgr);
  */
 size_t storage_mgr_wal_size(const storage_mgr_t *mgr);
 
+/**
+ * Replay WAL entries up to target_index
+ */
+int storage_mgr_replay_to(storage_mgr_t *mgr, uint64_t target_index);
+
 // ============================================================================
 // Log Truncation (for Raft conflicts)
 // ============================================================================
