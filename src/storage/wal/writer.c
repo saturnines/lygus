@@ -1,4 +1,6 @@
 #include "writer.h"
+#include "recovery.h"
+#include "platform/platform.h"
 #include "../../util/logging.h"
 #include "../../util/timing.h"
 #include "../compression/zstd_engine.h"
@@ -7,43 +9,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include "recovery.h"
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <dirent.h>
-
-
-// Cross-platform binary mode flag
-#ifdef _WIN32
-    #define O_BINARY _O_BINARY
-#else
-    #define O_BINARY 0
-#endif
-
-//  file locking for linux and windows
-#ifdef _WIN32
-    #include <windows.h>
-    #include <io.h>
-
-    static int lock_file_exclusive(int fd) {
-        HANDLE h = (HANDLE)_get_osfhandle(fd);
-        OVERLAPPED ov = {0};
-        if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                        0, 1, 0, &ov)) {
-            return -1;
-                        }
-        return 0;
-    }
-#else
-#include <sys/file.h>
-
-static int lock_file_exclusive(int fd) {
-        return flock(fd, LOCK_EX | LOCK_NB);
-    }
-#endif
 
 // ============================================================================
 // Internal State
@@ -51,7 +16,7 @@ static int lock_file_exclusive(int fd) {
 
 struct wal_writer {
     // File state
-    int         fd;             // Current segment file descriptor
+    lygus_fd_t  fd;             // Current segment file descriptor
     uint64_t    segment_num;    // Current segment number (1-based)
     uint64_t    write_offset;   // Current write position in segment
     char        data_dir[256];  // Data directory path
@@ -70,7 +35,7 @@ struct wal_writer {
     uint64_t    bytes_since_fsync;      // Bytes written since last fsync
     uint64_t    fsync_interval_us;      // Microseconds between fsyncs
     size_t      fsync_bytes;            // Bytes threshold for fsync
-    uint64_t    last_fsync_time_us;     // Last fsync timestamp (TODO: add timing)
+    uint64_t    last_fsync_time_us;     // Last fsync timestamp
 };
 
 // ============================================================================
@@ -81,7 +46,9 @@ struct wal_writer {
  * Get current segment file path
  */
 static void get_segment_path(const char *data_dir, uint64_t seg_num, char *out, size_t out_len) {
-    snprintf(out, out_len, "%s/WAL-%06" PRIu64 ".log", data_dir, seg_num);
+    char filename[64];
+    snprintf(filename, sizeof(filename), "WAL-%06" PRIu64 ".log", seg_num);
+    lygus_path_join(out, out_len, data_dir, filename);
 }
 
 /**
@@ -89,55 +56,55 @@ static void get_segment_path(const char *data_dir, uint64_t seg_num, char *out, 
  * Returns 0 if no segments exist
  */
 static uint64_t find_latest_segment(const char *data_dir) {
-    DIR *dir = opendir(data_dir);
+    lygus_dir_t *dir = lygus_dir_open(data_dir);
     if (!dir) return 0;
 
     uint64_t max_seg = 0;
-    struct dirent *entry;
+    const char *name;
 
-    while ((entry = readdir(dir)) != NULL) {
+    while ((name = lygus_dir_read(dir)) != NULL) {
         uint64_t seg_num;
-        if (sscanf(entry->d_name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
+        if (sscanf(name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
             if (seg_num > max_seg) {
                 max_seg = seg_num;
             }
         }
     }
 
-    closedir(dir);
+    lygus_dir_close(dir);
     return max_seg;
 }
 
 /**
  * Open segment file for appending
- * Returns fd or -1 on error
+ * Returns valid fd or LYGUS_INVALID_FD on error
  */
-static int open_segment(const char *data_dir, uint64_t seg_num, int create) {
+static lygus_fd_t open_segment(const char *data_dir, uint64_t seg_num, int create) {
     char path[512];
     get_segment_path(data_dir, seg_num, path, sizeof(path));
 
-    int flags = O_RDWR | O_BINARY;
+    int flags = LYGUS_O_RDWR;
     if (create) {
-        flags |= O_CREAT | O_EXCL;
+        flags |= LYGUS_O_CREAT | LYGUS_O_EXCL;
     }
 
-    int fd = open(path, flags, 0644);
-    if (fd < 0) {
-        return -1;
+    lygus_fd_t fd = lygus_file_open(path, flags, 0644);
+    if (fd == LYGUS_INVALID_FD) {
+        return LYGUS_INVALID_FD;
     }
 
     // Seek to end if appending
     if (!create) {
-        if (lseek(fd, 0, SEEK_END) < 0) {
-            close(fd);
-            return -1;
+        if (lygus_file_seek(fd, 0, LYGUS_SEEK_END) < 0) {
+            lygus_file_close(fd);
+            return LYGUS_INVALID_FD;
         }
     }
 
     // Acquire exclusive lock
-    if (lock_file_exclusive(fd) < 0) {
-        close(fd);
-        return -1;
+    if (lygus_file_lock(fd, LYGUS_LOCK_EX | LYGUS_LOCK_NB) < 0) {
+        lygus_file_close(fd);
+        return LYGUS_INVALID_FD;
     }
 
     return fd;
@@ -169,9 +136,7 @@ static int write_block(wal_writer_t *w) {
         return LYGUS_OK;  // Nothing to write
     }
 
-
-
-    uint64_t start_ns = lygus_now_ns();  // ← START TIMER
+    uint64_t start_ns = lygus_monotonic_ns();
 
     // Allocate compressed buffer (needs headroom for Zstd metadata)
     uint8_t comp_buf[WAL_BLOCK_SIZE + 1024];
@@ -192,18 +157,18 @@ static int write_block(wal_writer_t *w) {
     w->block_flags = 0;  // Clear flags after applying
 
     // Write header
-    ssize_t n = write(w->fd, &hdr, sizeof(hdr));
+    int64_t n = lygus_file_write(w->fd, &hdr, sizeof(hdr));
     if (n != sizeof(hdr)) {
-        return (errno == ENOSPC) ? LYGUS_ERR_DISK_FULL : LYGUS_ERR_WRITE;
+        return lygus_errno_is_disk_full() ? LYGUS_ERR_DISK_FULL : LYGUS_ERR_WRITE;
     }
 
     // Write compressed payload
-    n = write(w->fd, comp_buf, comp_len);
+    n = lygus_file_write(w->fd, comp_buf, comp_len);
     if (n != comp_len) {
-        return (errno == ENOSPC) ? LYGUS_ERR_DISK_FULL : LYGUS_ERR_WRITE;
+        return lygus_errno_is_disk_full() ? LYGUS_ERR_DISK_FULL : LYGUS_ERR_WRITE;
     }
 
-    uint64_t end_ns = lygus_now_ns();  // ← END TIMER
+    uint64_t end_ns = lygus_monotonic_ns();
 
     // Update state
     size_t total_written = sizeof(hdr) + comp_len;
@@ -212,7 +177,7 @@ static int write_block(wal_writer_t *w) {
     w->block_seq++;
     w->block_fill = 0;  // Reset buffer
 
-    // Log block write WITH LATENCY
+    // Log block write with latency
     struct {
         uint64_t seq_no;
         uint32_t raw_len;
@@ -222,7 +187,7 @@ static int write_block(wal_writer_t *w) {
         .seq_no = hdr.seq_no,
         .raw_len = hdr.raw_len,
         .comp_len = hdr.comp_len,
-        .latency_us = lygus_ns_to_us(end_ns - start_ns),  // ← FIXED
+        .latency_us = (uint32_t)((end_ns - start_ns) / 1000),
     };
     LOG_DEBUG(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_BLOCK_DONE,
               0, 0, &log_data, sizeof(log_data));
@@ -235,18 +200,17 @@ static int write_block(wal_writer_t *w) {
  * Scan segment file to find highest block sequence number
  * Returns highest seq_no found, or 0 if file is empty/unreadable
  */
-static uint64_t find_highest_block_seq(int fd) {
+static uint64_t find_highest_block_seq(lygus_fd_t fd) {
     uint64_t highest_seq = 0;
-    off_t offset = 0;  // Track absolute position
 
     // Seek to start
-    if (lseek(fd, 0, SEEK_SET) < 0) {
+    if (lygus_file_seek(fd, 0, LYGUS_SEEK_SET) < 0) {
         return 0;  // Can't seek, assume empty
     }
 
     while (1) {
         wal_block_hdr_t hdr;
-        ssize_t n = read(fd, &hdr, sizeof(hdr));
+        int64_t n = lygus_file_read(fd, &hdr, sizeof(hdr));
 
         if (n == 0) {
             break;  // EOF
@@ -267,17 +231,13 @@ static uint64_t find_highest_block_seq(int fd) {
         }
 
         // Move to next block (skip compressed payload)
-        // FIXED: Use SEEK_CUR to skip relative to current position
-        off_t skip = (off_t)hdr.comp_len;
-        if (lseek(fd, skip, SEEK_CUR) < 0) {
+        if (lygus_file_seek(fd, (int64_t)hdr.comp_len, LYGUS_SEEK_CUR) < 0) {
             break;  // Seek failed, stop
         }
-
-        offset += sizeof(hdr) + hdr.comp_len;  // Track for debugging (optional)
     }
 
     // Restore file position to end for appending
-    lseek(fd, 0, SEEK_END);
+    lygus_file_seek(fd, 0, LYGUS_SEEK_END);
 
     return highest_seq;
 }
@@ -288,7 +248,6 @@ static uint64_t find_highest_block_seq(int fd) {
 
 wal_writer_t* wal_writer_open(const wal_writer_opts_t *opts) {
     if (!opts || !opts->data_dir) {
-        errno = EINVAL;
         return NULL;
     }
 
@@ -312,11 +271,7 @@ wal_writer_t* wal_writer_open(const wal_writer_opts_t *opts) {
     }
 
     // Ensure data directory exists
-    #ifdef _WIN32
-        mkdir(opts->data_dir);
-    #else
-        mkdir(opts->data_dir, 0755);
-    #endif
+    lygus_mkdir(opts->data_dir, 0755);
 
     // Find latest segment
     uint64_t latest = find_latest_segment(opts->data_dir);
@@ -325,14 +280,14 @@ wal_writer_t* wal_writer_open(const wal_writer_opts_t *opts) {
         // Append to existing segment
         w->segment_num = latest;
         w->fd = open_segment(opts->data_dir, latest, 0);
-        if (w->fd < 0) {
+        if (w->fd == LYGUS_INVALID_FD) {
             lygus_zstd_destroy(w->zctx);
             free(w);
             return NULL;
         }
 
         // Get current offset
-        w->write_offset = lseek(w->fd, 0, SEEK_CUR);
+        w->write_offset = (uint64_t)lygus_file_seek(w->fd, 0, LYGUS_SEEK_CUR);
 
         // Scan to recover highest block_seq
         uint64_t highest_seq = find_highest_block_seq(w->fd);
@@ -344,7 +299,7 @@ wal_writer_t* wal_writer_open(const wal_writer_opts_t *opts) {
         // Create first segment
         w->segment_num = 1;
         w->fd = open_segment(opts->data_dir, 1, 1);
-        if (w->fd < 0) {
+        if (w->fd == LYGUS_INVALID_FD) {
             lygus_zstd_destroy(w->zctx);
             free(w);
             return NULL;
@@ -374,8 +329,8 @@ int wal_writer_close(wal_writer_t *w) {
     int ret = wal_writer_flush(w, 1);  // Flush and sync
 
     // Close file
-    if (w->fd >= 0) {
-        close(w->fd);
+    if (w->fd != LYGUS_INVALID_FD) {
+        lygus_file_close(w->fd);
     }
 
     // Cleanup
@@ -429,14 +384,13 @@ int wal_writer_append(wal_writer_t *w,
                                        key, klen, val, vlen,
                                        &w->block_buf[w->block_fill],
                                        WAL_BLOCK_SIZE - w->block_fill);
-    if (encoded < 0) {  //
+    if (encoded < 0) {
         return (int)encoded;  // Propagate error
     }
 
-    w->block_fill += (size_t)encoded;  // Now safe to update
+    w->block_fill += (size_t)encoded;
 
-
-    // NEW: Flush block if it's full, but DON'T fsync
+    // Flush block if it's full, but DON'T fsync yet
     if (w->block_fill >= WAL_BLOCK_SIZE * 0.9) {
         int ret = write_block(w);
         if (ret < 0) {
@@ -445,8 +399,7 @@ int wal_writer_append(wal_writer_t *w,
     }
 
     // CRITICAL: For Paxos I2 invariant, we MUST fsync before returning
-    // Option A: Always fsync (simplest, correct, but slow)
-    //  can prolly optimize it with batching at the raft layer
+    // Can optimize with batching at the raft layer
     int ret = wal_writer_flush(w, 1);  // Force flush + sync
     if (ret < 0) {
         return ret;
@@ -479,28 +432,24 @@ int wal_writer_fsync(wal_writer_t *w) {
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    uint64_t start_ns = lygus_now_ns();  // ← START TIMER
+    uint64_t start_ns = lygus_monotonic_ns();
 
-#ifdef _WIN32
-    if (_commit(w->fd) < 0) {
-#else
-    if (fdatasync(w->fd) < 0) {
-#endif
+    if (lygus_file_sync(w->fd) < 0) {
         LOG_ERROR(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_FSYNC_DONE,
                   0, 0, NULL, 0);
         return LYGUS_ERR_FSYNC;
     }
 
-    uint64_t end_ns = lygus_now_ns();  // ← END TIMER
+    uint64_t end_ns = lygus_monotonic_ns();
 
     w->bytes_since_fsync = 0;
-    w->last_fsync_time_us = lygus_now_us();  // ← FIXED (update last fsync time)
+    w->last_fsync_time_us = (uint64_t)(lygus_monotonic_ns() / 1000);
 
-    // Log fsync WITH LATENCY
+    // Log fsync with latency
     struct {
         uint32_t latency_us;
     } log_data = {
-        .latency_us = lygus_ns_to_us(end_ns - start_ns),  // ← FIXED
+        .latency_us = (uint32_t)((end_ns - start_ns) / 1000),
     };
     LOG_INFO(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_FSYNC_DONE,
              0, 0, &log_data, sizeof(log_data));
@@ -525,13 +474,13 @@ int wal_writer_rotate(wal_writer_t *w) {
     }
 
     // Close current segment
-    close(w->fd);
-    w->fd = -1;
+    lygus_file_close(w->fd);
+    w->fd = LYGUS_INVALID_FD;
 
     // Open next segment
     w->segment_num++;
     w->fd = open_segment(w->data_dir, w->segment_num, 1);
-    if (w->fd < 0) {
+    if (w->fd == LYGUS_INVALID_FD) {
         return LYGUS_ERR_OPEN_FILE;
     }
 
