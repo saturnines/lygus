@@ -2,6 +2,7 @@
 #include "wal_index.h"
 #include "writer.h"
 #include "recovery.h"
+#include "platform/platform.h"
 #include "../../util/logging.h"
 #include "../compression/zstd_engine.h"
 
@@ -9,11 +10,6 @@
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 
 // ============================================================================
 // Internal State
@@ -92,7 +88,9 @@ static int recovery_index_builder(const wal_entry_t *entry, void *ctx) {
 
 static void get_segment_path(const char *data_dir, uint64_t seg_num,
                              char *out, size_t out_len) {
-    snprintf(out, out_len, "%s/WAL-%06" PRIu64 ".log", data_dir, seg_num);
+    char filename[64];
+    snprintf(filename, sizeof(filename), "WAL-%06" PRIu64 ".log", seg_num);
+    lygus_path_join(out, out_len, data_dir, filename);
 }
 
 // ============================================================================
@@ -393,29 +391,25 @@ int wal_truncate_after(wal_t *w, uint64_t index) {
     char path[512];
     get_segment_path(w->data_dir, loc.segment_num, path, sizeof(path));
 
-    int fd = open(path, O_RDWR);
-    if (fd < 0) {
+    lygus_fd_t fd = lygus_file_open(path, LYGUS_O_RDWR, 0);
+    if (fd == LYGUS_INVALID_FD) {
         return LYGUS_ERR_IO;
     }
 
     // Truncate at block_offset (removes the block and everything after)
     // This may remove some entries from the block that are <= index, but raft will resend them
-    if (ftruncate(fd, loc.block_offset) < 0) {
-        close(fd);
+    if (lygus_file_truncate(fd, loc.block_offset) < 0) {
+        lygus_file_close(fd);
         return LYGUS_ERR_IO;
     }
 
     // Fsync to ensure truncation is durable
-#ifdef _WIN32
-    if (_commit(fd) < 0) {
-#else
-    if (fdatasync(fd) < 0) {
-#endif
-        close(fd);
+    if (lygus_file_sync(fd) < 0) {
+        lygus_file_close(fd);
         return LYGUS_ERR_FSYNC;
     }
 
-    close(fd);
+    lygus_file_close(fd);
 
     // Delete any segments after this one
     uint64_t *segments = NULL;
@@ -426,7 +420,7 @@ int wal_truncate_after(wal_t *w, uint64_t index) {
             if (segments[i] > loc.segment_num) {
                 char dead_path[512];
                 get_segment_path(w->data_dir, segments[i], dead_path, sizeof(dead_path));
-                unlink(dead_path);
+                lygus_unlink(dead_path);
             }
         }
         free(segments);
@@ -500,7 +494,8 @@ int wal_purge_before(wal_t *w, uint64_t index) {
         char path[512];
         get_segment_path(w->data_dir, seg, path, sizeof(path));
 
-        if (unlink(path) < 0 && errno != ENOENT) {
+        if (lygus_unlink(path) < 0 && lygus_path_exists(path)) {
+            // File exists but couldn't delete
             LOG_ERROR(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_CORRUPTION,
                      0, seg, NULL, 0);
             // Continue trying to delete other segments
@@ -535,7 +530,7 @@ int wal_clear(wal_t *w) {
         for (size_t i = 0; i < num_segments; i++) {
             char path[512];
             get_segment_path(w->data_dir, segments[i], path, sizeof(path));
-            unlink(path);
+            lygus_unlink(path);
         }
         free(segments);
     }
@@ -642,7 +637,6 @@ int wal_get_recovery_result(const wal_t *w, wal_recovery_result_t *result) {
     return LYGUS_OK;
 }
 
-// I need windows support
 int wal_read_entry(wal_t *w, uint64_t index, wal_entry_t *entry,
                    uint8_t *buf, size_t buf_cap)
 {
@@ -663,44 +657,43 @@ int wal_read_entry(wal_t *w, uint64_t index, wal_entry_t *entry,
 
     // Build segment path
     char path[512];
-    snprintf(path, sizeof(path), "%s/WAL-%06" PRIu64 ".log",
-             w->data_dir, loc.segment_num);
+    get_segment_path(w->data_dir, loc.segment_num, path, sizeof(path));
 
     // Open segment file
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
+    lygus_fd_t fd = lygus_file_open(path, LYGUS_O_RDONLY, 0);
+    if (fd == LYGUS_INVALID_FD) {
         return LYGUS_ERR_IO;
     }
 
     // Read block header
     wal_block_hdr_t hdr;
-    ssize_t n = pread(fd, &hdr, sizeof(hdr), loc.block_offset);
+    int64_t n = lygus_file_pread(fd, &hdr, sizeof(hdr), loc.block_offset);
     if (n != sizeof(hdr)) {
-        close(fd);
+        lygus_file_close(fd);
         return LYGUS_ERR_IO;
     }
 
     // Validate header
     ret = wal_block_validate_header(&hdr);
     if (ret != LYGUS_OK) {
-        close(fd);
+        lygus_file_close(fd);
         return ret;
     }
 
     // Read compressed payload
     uint8_t comp_buf[WAL_BLOCK_SIZE + 1024];
     if (hdr.comp_len > sizeof(comp_buf)) {
-        close(fd);
+        lygus_file_close(fd);
         return LYGUS_ERR_BAD_BLOCK;
     }
 
-    n = pread(fd, comp_buf, hdr.comp_len, loc.block_offset + sizeof(hdr));
-    if (n != (ssize_t)hdr.comp_len) {
-        close(fd);
+    n = lygus_file_pread(fd, comp_buf, hdr.comp_len, loc.block_offset + sizeof(hdr));
+    if (n != (int64_t)hdr.comp_len) {
+        lygus_file_close(fd);
         return LYGUS_ERR_IO;
     }
 
-    close(fd);
+    lygus_file_close(fd);
 
     // Decompress block
     ssize_t decompressed = wal_block_decompress(&hdr, comp_buf, w->zctx,
@@ -713,8 +706,6 @@ int wal_read_entry(wal_t *w, uint64_t index, wal_entry_t *entry,
     // (We need to decode from the start because entries are variable-length)
     size_t offset = 0;
     while (offset < (size_t)decompressed) {
-        size_t this_entry_offset = offset;
-
         ret = wal_block_next_entry(buf, decompressed, &offset, entry);
         if (ret == LYGUS_ERR_INCOMPLETE) {
             // Reached end of block without finding entry
