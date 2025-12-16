@@ -27,6 +27,14 @@
 #endif
 
 // ============================================================================
+// Error Helpers
+// ============================================================================
+
+int lygus_errno_is_disk_full(void) {
+    return errno == ENOSPC;
+}
+
+// ============================================================================
 // File Operations
 // ============================================================================
 
@@ -89,7 +97,6 @@ int64_t lygus_file_seek(lygus_fd_t fd, int64_t offset, int whence) {
 int lygus_file_sync(lygus_fd_t fd) {
     if (fd < 0) return -1;
 
-    // Use fdatasync if available (syncs data but not necessarily metadata)
 #if defined(_POSIX_SYNCHRONIZED_IO) && _POSIX_SYNCHRONIZED_IO > 0
     return fdatasync(fd);
 #else
@@ -102,24 +109,38 @@ int lygus_file_truncate(lygus_fd_t fd, uint64_t size) {
     return ftruncate(fd, (off_t)size);
 }
 
-int lygus_file_lock(lygus_fd_t fd) {
+int lygus_file_lock(lygus_fd_t fd, int flags) {
     if (fd < 0) return -1;
-    // LOCK_NB = non-blocking
-    return flock(fd, LOCK_EX | LOCK_NB);
+
+    int flock_op = 0;
+
+    if (flags & LYGUS_LOCK_UN) {
+        flock_op = LOCK_UN;
+    } else if (flags & LYGUS_LOCK_EX) {
+        flock_op = LOCK_EX;
+    } else if (flags & LYGUS_LOCK_SH) {
+        flock_op = LOCK_SH;
+    } else {
+        return -1;
+    }
+
+    if (flags & LYGUS_LOCK_NB) {
+        flock_op |= LOCK_NB;
+    }
+
+    return flock(fd, flock_op);
 }
 
 int lygus_file_unlock(lygus_fd_t fd) {
-    if (fd < 0) return -1;
-    return flock(fd, LOCK_UN);
+    return lygus_file_lock(fd, LYGUS_LOCK_UN);
 }
 
 int64_t lygus_file_size(lygus_fd_t fd) {
     if (fd < 0) return -1;
 
     struct stat st;
-    if (fstat(fd, &st) < 0) {
-        return -1;
-    }
+    if (fstat(fd, &st) < 0) return -1;
+
     return (int64_t)st.st_size;
 }
 
@@ -127,10 +148,10 @@ int64_t lygus_file_size(lygus_fd_t fd) {
 // Filesystem Operations
 // ============================================================================
 
-int lygus_mkdir(const char *path) {
+int lygus_mkdir(const char *path, int mode) {
     if (!path) return -1;
 
-    int ret = mkdir(path, 0755);
+    int ret = mkdir(path, (mode_t)mode);
     if (ret < 0 && errno == EEXIST) {
         return 0;  // Directory already exists is OK
     }
@@ -195,9 +216,7 @@ const char* lygus_dir_read(lygus_dir_t *dir) {
 
 void lygus_dir_close(lygus_dir_t *dir) {
     if (!dir) return;
-    if (dir->dir) {
-        closedir(dir->dir);
-    }
+    if (dir->dir) closedir(dir->dir);
     free(dir);
 }
 
@@ -213,14 +232,13 @@ int lygus_path_join(char *out, size_t out_len, const char *dir, const char *file
     if (!out || !dir || !file || out_len == 0) return -1;
 
     int n = snprintf(out, out_len, "%s/%s", dir, file);
-    if (n < 0 || (size_t)n >= out_len) {
-        return -1;
-    }
+    if (n < 0 || (size_t)n >= out_len) return -1;
+
     return 0;
 }
 
 // ============================================================================
-// Async Process (fork based)
+// Async Process (fork-based)
 // ============================================================================
 
 struct lygus_async_proc {
@@ -230,7 +248,7 @@ struct lygus_async_proc {
 };
 
 int lygus_async_fork_supported(void) {
-    return 1;  // POSIX supports fork
+    return 1;
 }
 
 lygus_async_proc_t* lygus_async_fork(int (*func)(void *ctx), void *ctx, int *is_child) {
@@ -240,25 +258,18 @@ lygus_async_proc_t* lygus_async_fork(int (*func)(void *ctx), void *ctx, int *is_
 
     pid_t pid = fork();
 
-    if (pid < 0) {
-        // Fork failed
-        return NULL;
-    }
+    if (pid < 0) return NULL;
 
     if (pid == 0) {
         // Child process
         *is_child = 1;
         int ret = func(ctx);
         _exit(ret == 0 ? 0 : 1);
-        // Never returns
     }
 
     // Parent process
     lygus_async_proc_t *proc = malloc(sizeof(lygus_async_proc_t));
-    if (!proc) {
-        // Can't track child, but it's already forked... not much we can do
-        return NULL;
-    }
+    if (!proc) return NULL;
 
     proc->pid = pid;
     proc->completed = 0;
@@ -280,17 +291,13 @@ int lygus_async_poll(lygus_async_proc_t *proc, int *done, int *success) {
     pid_t result = waitpid(proc->pid, &status, WNOHANG);
 
     if (result == 0) {
-        // Still running
         *done = 0;
         *success = 0;
         return 0;
     }
 
-    if (result < 0) {
-        return -1;
-    }
+    if (result < 0) return -1;
 
-    // Child finished
     proc->completed = 1;
     proc->success = (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
 
@@ -310,9 +317,7 @@ int lygus_async_wait(lygus_async_proc_t *proc, int *success) {
     int status;
     pid_t result = waitpid(proc->pid, &status, 0);
 
-    if (result < 0) {
-        return -1;
-    }
+    if (result < 0) return -1;
 
     proc->completed = 1;
     proc->success = (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 1 : 0;
@@ -322,7 +327,7 @@ int lygus_async_wait(lygus_async_proc_t *proc, int *success) {
 }
 
 void lygus_async_free(lygus_async_proc_t *proc) {
-    free(proc);  // free(NULL) is safe
+    free(proc);
 }
 
 // ============================================================================

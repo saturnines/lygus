@@ -18,6 +18,18 @@
 #include <errno.h>
 
 // ============================================================================
+// Error Helpers
+// ============================================================================
+
+int lygus_errno_is_disk_full(void) {
+    // Check both errno and Windows error
+    if (errno == ENOSPC) return 1;
+
+    DWORD err = GetLastError();
+    return (err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL);
+}
+
+// ============================================================================
 // File Operations
 // ============================================================================
 
@@ -80,7 +92,6 @@ int64_t lygus_file_pread(lygus_fd_t fd, void *buf, size_t len, uint64_t offset) 
     // Windows doesn't have pread, so we emulate with seek+read+seek
     // This is NOT thread-safe for concurrent reads on the same fd!
     // For thread safety, use native Windows APIs with OVERLAPPED
-    // If you are building this, and you are on windows why?
 
     int64_t old_pos = _lseeki64(fd, 0, SEEK_CUR);
     if (old_pos < 0) return -1;
@@ -100,7 +111,7 @@ int64_t lygus_file_pread(lygus_fd_t fd, void *buf, size_t len, uint64_t offset) 
 int64_t lygus_file_pwrite(lygus_fd_t fd, const void *buf, size_t len, uint64_t offset) {
     if (fd < 0 || !buf) return -1;
 
-    // Same caveat as pread, not thread-safe
+    // Same caveat as pread - not thread-safe
 
     int64_t old_pos = _lseeki64(fd, 0, SEEK_CUR);
     if (old_pos < 0) return -1;
@@ -149,7 +160,6 @@ int lygus_file_truncate(lygus_fd_t fd, uint64_t size) {
     }
 
     // Truncate at current position
-    // Note: _chsize_s is safer but less portable
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) {
         _lseeki64(fd, old_pos, SEEK_SET);
@@ -169,7 +179,7 @@ int lygus_file_truncate(lygus_fd_t fd, uint64_t size) {
     return 0;
 }
 
-int lygus_file_lock(lygus_fd_t fd) {
+int lygus_file_lock(lygus_fd_t fd, int flags) {
     if (fd < 0) return -1;
 
     HANDLE h = (HANDLE)_get_osfhandle(fd);
@@ -177,10 +187,27 @@ int lygus_file_lock(lygus_fd_t fd) {
 
     OVERLAPPED ov = {0};
 
-    // LOCKFILE_EXCLUSIVE_LOCK = exclusive lock
-    // LOCKFILE_FAIL_IMMEDIATELY = non-blocking
-    if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                    0, 1, 0, &ov)) {
+    // Handle unlock
+    if (flags & LYGUS_LOCK_UN) {
+        if (!UnlockFileEx(h, 0, 1, 0, &ov)) {
+            return -1;
+        }
+        return 0;
+    }
+
+    // Build lock flags
+    DWORD lock_flags = 0;
+
+    if (flags & LYGUS_LOCK_EX) {
+        lock_flags |= LOCKFILE_EXCLUSIVE_LOCK;
+    }
+    // LYGUS_LOCK_SH = shared lock, no LOCKFILE_EXCLUSIVE_LOCK flag
+
+    if (flags & LYGUS_LOCK_NB) {
+        lock_flags |= LOCKFILE_FAIL_IMMEDIATELY;
+    }
+
+    if (!LockFileEx(h, lock_flags, 0, 1, 0, &ov)) {
         return -1;
     }
 
@@ -188,18 +215,7 @@ int lygus_file_lock(lygus_fd_t fd) {
 }
 
 int lygus_file_unlock(lygus_fd_t fd) {
-    if (fd < 0) return -1;
-
-    HANDLE h = (HANDLE)_get_osfhandle(fd);
-    if (h == INVALID_HANDLE_VALUE) return -1;
-
-    OVERLAPPED ov = {0};
-
-    if (!UnlockFileEx(h, 0, 1, 0, &ov)) {
-        return -1;
-    }
-
-    return 0;
+    return lygus_file_lock(fd, LYGUS_LOCK_UN);
 }
 
 int64_t lygus_file_size(lygus_fd_t fd) {
@@ -220,8 +236,10 @@ int64_t lygus_file_size(lygus_fd_t fd) {
 // Filesystem Operations
 // ============================================================================
 
-int lygus_mkdir(const char *path) {
+int lygus_mkdir(const char *path, int mode) {
     if (!path) return -1;
+
+    (void)mode;  // Windows ignores Unix permission modes
 
     int ret = _mkdir(path);
     if (ret < 0 && errno == EEXIST) {
@@ -421,10 +439,9 @@ uint64_t lygus_monotonic_ns(void) {
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
 
-    // Convert to nanoseconds without overflowing 64-bit arithmetic.
-    // counter.QuadPart grows with uptime; multiplying by 1e9 first will overflow
-    // on long-running systems and can make time appear to go backwards.
-    // Split into seconds + remainder to preserve monotonicity.
+    // Convert to nanoseconds
+    // Be careful of overflow: counter.QuadPart * 1e9 could overflow
+    // Split the calculation: (counter / freq) * 1e9 + (counter % freq) * 1e9 / freq
     uint64_t seconds = counter.QuadPart / freq.QuadPart;
     uint64_t remainder = counter.QuadPart % freq.QuadPart;
 

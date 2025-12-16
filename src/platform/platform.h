@@ -3,7 +3,6 @@
 
 /**
  * Lygus Platform Abstraction Layer
- * Put's all OS specific code into a single interface.
  * Build system selects platform_posix.c or platform_win32.c
  */
 
@@ -18,18 +17,18 @@ extern "C" {
 // Types
 // ============================================================================
 
-/** File descriptor (int-compatible for simplicity) */
+/** File descriptor (opaque, but int-compatible for simplicity) */
 typedef int lygus_fd_t;
 #define LYGUS_INVALID_FD (-1)
 
-/** Directory handle */
+/** Directory handle (opaque) */
 typedef struct lygus_dir lygus_dir_t;
 
-/** Async process handle for fork-based snapshots*/
+/** Async process handle for fork-based snapshots (opaque) */
 typedef struct lygus_async_proc lygus_async_proc_t;
 
 // ============================================================================
-// Open Flags
+// Open Flags (portable subset)
 // ============================================================================
 
 #define LYGUS_O_RDONLY   0x0001
@@ -41,12 +40,21 @@ typedef struct lygus_async_proc lygus_async_proc_t;
 #define LYGUS_O_APPEND   0x0080
 
 // ============================================================================
-// Seek Whence
+// Seek Whence (portable)
 // ============================================================================
 
 #define LYGUS_SEEK_SET   0
 #define LYGUS_SEEK_CUR   1
 #define LYGUS_SEEK_END   2
+
+// ============================================================================
+// Lock Flags
+// ============================================================================
+
+#define LYGUS_LOCK_SH    0x01   // Shared lock (read)
+#define LYGUS_LOCK_EX    0x02   // Exclusive lock (write)
+#define LYGUS_LOCK_NB    0x04   // Non-blocking (fail immediately if can't lock)
+#define LYGUS_LOCK_UN    0x08   // Unlock
 
 // ============================================================================
 // File Operations
@@ -140,12 +148,13 @@ int lygus_file_sync(lygus_fd_t fd);
 int lygus_file_truncate(lygus_fd_t fd, uint64_t size);
 
 /**
- * Acquire exclusive lock on file (non-blocking)
+ * Acquire lock on file
  *
- * @param fd  File descriptor
- * @return    0 on success, -1 if already locked or error
+ * @param fd     File descriptor
+ * @param flags  LYGUS_LOCK_* flags (EX or SH, optionally | NB)
+ * @return       0 on success, -1 if already locked or error
  */
-int lygus_file_lock(lygus_fd_t fd);
+int lygus_file_lock(lygus_fd_t fd, int flags);
 
 /**
  * Release lock on file
@@ -171,9 +180,10 @@ int64_t lygus_file_size(lygus_fd_t fd);
  * Create directory (single level, not recursive)
  *
  * @param path  Directory path
+ * @param mode  Permission mode (e.g., 0755), ignored on Windows
  * @return      0 on success, -1 on error (EEXIST is NOT an error)
  */
-int lygus_mkdir(const char *path);
+int lygus_mkdir(const char *path, int mode);
 
 /**
  * Delete a file
@@ -255,7 +265,7 @@ const char* lygus_path_separator(void);
 int lygus_path_join(char *out, size_t out_len, const char *dir, const char *file);
 
 // ============================================================================
-// Async Process (specifically for fork-based snapshots)
+// Async Process (for fork-based snapshots)
 // ============================================================================
 
 /**
@@ -336,11 +346,25 @@ void lygus_sleep_us(uint64_t us);
 uint64_t lygus_monotonic_ns(void);
 
 /**
- * Get wall clock timestamp in nanoseconds
+ * Get wall clock timestamp in nanoseconds (for logging)
  *
  * @return  Nanoseconds since Unix epoch
  */
 uint64_t lygus_realtime_ns(void);
+
+// ============================================================================
+// Error Helpers
+// ============================================================================
+
+/**
+ * Check if last I/O error was "disk full" (ENOSPC)
+ *
+ * Call immediately after a write/sync returns -1.
+ * Useful for distinguishing "pause and wait for space" vs "disk dead".
+ *
+ * @return  1 if last error was disk full, 0 otherwise
+ */
+int lygus_errno_is_disk_full(void);
 
 #ifdef __cplusplus
 }
