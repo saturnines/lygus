@@ -1,4 +1,5 @@
 #include "recovery.h"
+#include "platform/platform.h"
 #include "../../util/logging.h"
 #include "../../util/timing.h"
 #include "../compression/zstd_engine.h"
@@ -7,28 +8,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <dirent.h>
-
-
-#ifdef _WIN32
-    #define fsync_wrapper(fd) _commit(fd)
-#else
-    #define fsync_wrapper(fd) fdatasync(fd)
-#endif
-
-
 
 // ============================================================================
 // Scanner State
 // ============================================================================
 
 struct wal_scanner {
-    int                   fd;          // File descriptor
+    lygus_fd_t            fd;          // File descriptor
     uint64_t              offset;      // Current read position
     lygus_zstd_ctx_t     *zctx;        // Decompression context (borrowed)
     char                  path[512];   // File path (for truncation)
@@ -59,23 +45,23 @@ int wal_list_segments(const char *data_dir,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    DIR *dir = opendir(data_dir);
+    lygus_dir_t *dir = lygus_dir_open(data_dir);
     if (!dir) {
         return LYGUS_ERR_IO;
     }
 
     // First pass: count segments
     size_t count = 0;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
+    const char *name;
+    while ((name = lygus_dir_read(dir)) != NULL) {
         uint64_t seg_num;
-        if (sscanf(entry->d_name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
+        if (sscanf(name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
             count++;
         }
     }
 
     if (count == 0) {
-        closedir(dir);
+        lygus_dir_close(dir);
         *out_segs = NULL;
         *out_count = 0;
         return LYGUS_OK;
@@ -84,20 +70,27 @@ int wal_list_segments(const char *data_dir,
     // Allocate array
     uint64_t *segs = malloc(count * sizeof(uint64_t));
     if (!segs) {
-        closedir(dir);
+        lygus_dir_close(dir);
         return LYGUS_ERR_NOMEM;
     }
 
+    // Reopen dir to restart iteration
+    lygus_dir_close(dir);
+    dir = lygus_dir_open(data_dir);
+    if (!dir) {
+        free(segs);
+        return LYGUS_ERR_IO;
+    }
+
     // Second pass: collect segment numbers
-    rewinddir(dir);
     size_t idx = 0;
-    while ((entry = readdir(dir)) != NULL && idx < count) {
+    while ((name = lygus_dir_read(dir)) != NULL && idx < count) {
         uint64_t seg_num;
-        if (sscanf(entry->d_name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
+        if (sscanf(name, "WAL-%" SCNu64 ".log", &seg_num) == 1) {
             segs[idx++] = seg_num;
         }
     }
-    closedir(dir);
+    lygus_dir_close(dir);
 
     // Sort segments
     qsort(segs, count, sizeof(uint64_t), compare_uint64);
@@ -113,22 +106,17 @@ int wal_list_segments(const char *data_dir,
 
 wal_scanner_t* wal_scanner_open(const char *path, void *zctx) {
     if (!path || !zctx) {
-        errno = EINVAL;
-        return NULL;
+        return NULL; /// Callers check returen value not errno.
     }
 
-#ifdef _WIN32
-    int fd = open(path, O_RDWR | O_BINARY);
-#else
-    int fd = open(path, O_RDWR);
-#endif
-    if (fd < 0) {
+    lygus_fd_t fd = lygus_file_open(path, LYGUS_O_RDWR, 0);
+    if (fd == LYGUS_INVALID_FD) {
         return NULL;
     }
 
     wal_scanner_t *scanner = malloc(sizeof(wal_scanner_t));
     if (!scanner) {
-        close(fd);
+        lygus_file_close(fd);
         return NULL;
     }
 
@@ -157,7 +145,7 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
     uint64_t block_start_offset = scanner->offset;
 
     // Read block header
-    ssize_t n = read(scanner->fd, hdr, sizeof(*hdr));
+    int64_t n = lygus_file_read(scanner->fd, hdr, sizeof(*hdr));
     if (n == 0) {
         return 0;  // EOF
     }
@@ -168,12 +156,11 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
 
     scanner->offset += sizeof(*hdr);
 
-
     int ret = wal_block_validate_header(hdr);
     if (ret < 0) {
         // Bad header - will truncate at block_start_offset
         return ret;
-     }
+    }
 
     // Allocate buffer for compressed data
     uint8_t comp_buf[WAL_BLOCK_SIZE + 1024];
@@ -184,8 +171,8 @@ ssize_t wal_scanner_next_block(wal_scanner_t *scanner,
     }
 
     // Read compressed payload
-    n = read(scanner->fd, comp_buf, comp_len);
-    if (n != (ssize_t)comp_len) {
+    n = lygus_file_read(scanner->fd, comp_buf, comp_len);
+    if (n != (int64_t)comp_len) {
         // Partial block at EOF, will truncate at block_start_offset
         return LYGUS_ERR_TRUNCATED;
     }
@@ -211,8 +198,8 @@ uint64_t wal_scanner_offset(const wal_scanner_t *scanner) {
 void wal_scanner_close(wal_scanner_t *scanner) {
     if (!scanner) return;
 
-    if (scanner->fd >= 0) {
-        close(scanner->fd);
+    if (scanner->fd != LYGUS_INVALID_FD) {
+        lygus_file_close(scanner->fd);
     }
     free(scanner);
 }
@@ -250,21 +237,17 @@ int wal_scanner_truncate_at(wal_scanner_t *scanner, uint64_t offset) {
     }
 
     // Seek to the truncation point
-    if (lseek(scanner->fd, offset, SEEK_SET) < 0) {
+    if (lygus_file_seek(scanner->fd, (int64_t)offset, LYGUS_SEEK_SET) < 0) {
         return LYGUS_ERR_IO;
     }
 
     // Truncate at this offset
-    if (ftruncate(scanner->fd, offset) < 0) {
+    if (lygus_file_truncate(scanner->fd, offset) < 0) {
         return LYGUS_ERR_IO;
     }
 
     // Fsync
-#ifdef _WIN32
-    if (_commit(scanner->fd) < 0) {
-#else
-    if (fdatasync(scanner->fd) < 0) {
-#endif
+    if (lygus_file_sync(scanner->fd) < 0) {
         return LYGUS_ERR_FSYNC;
     }
 
@@ -288,7 +271,7 @@ int wal_recover(const char *data_dir,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    uint64_t start_ns = lygus_now_ns();  // ← START TIMER
+    uint64_t start_ns = lygus_monotonic_ns();
 
     // Initialize result
     memset(result, 0, sizeof(*result));
@@ -315,8 +298,11 @@ int wal_recover(const char *data_dir,
         uint64_t seg_num = segments[i];
 
         // Build segment path
+        char seg_filename[64];
+        snprintf(seg_filename, sizeof(seg_filename), "WAL-%06" PRIu64 ".log", seg_num);
+
         char seg_path[512];
-        snprintf(seg_path, sizeof(seg_path), "%s/WAL-%06" PRIu64 ".log", data_dir, seg_num);
+        lygus_path_join(seg_path, sizeof(seg_path), data_dir, seg_filename);
 
         // Open scanner
         wal_scanner_t *scanner = wal_scanner_open(seg_path, zctx);
@@ -343,10 +329,8 @@ int wal_recover(const char *data_dir,
                 // EOF normal termination
                 break;
             }
-            // TODO remove print statement
+
             if (decompressed < 0) {
-                printf("DEBUG: Segment %" PRIu64 " - Block read error: %zd at offset %" PRIu64 "\n",
-                       seg_num, decompressed, block_start);
                 result->corruptions++;
                 wal_scanner_truncate_at(scanner, block_start);
                 result->truncated = 1;
@@ -390,10 +374,11 @@ int wal_recover(const char *data_dir,
                     result->highest_term = entry.term;
                 }
 
-                //Populate location info before callback
+                // Populate location info before callback
                 entry.segment_num = seg_num;
                 entry.block_offset = block_start;
                 entry.entry_offset = this_entry_offset;
+
                 if (callback) {
                     ret = callback(&entry, user_data);
                     if (ret < 0) {
@@ -416,21 +401,24 @@ int wal_recover(const char *data_dir,
 
         wal_scanner_close(scanner);
 
-        // If we hit corruption, DELETE and STOP
+        // If we hit corruption, DELETE subsequent segments and STOP
         if (corrupted) {
             LOG_WARN(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_CORRUPTION,
                      0, seg_num, NULL, 0);
 
             // Delete all segments after the corrupted one
             for (size_t j = i + 1; j < num_segments; j++) {
-                char dead_path[512];
-                snprintf(dead_path, sizeof(dead_path), "%s/WAL-%06" PRIu64 ".log",
-                         data_dir, segments[j]);
+                char dead_filename[64];
+                snprintf(dead_filename, sizeof(dead_filename), "WAL-%06" PRIu64 ".log", segments[j]);
 
-                if (unlink(dead_path) == 0) {
+                char dead_path[512];
+                lygus_path_join(dead_path, sizeof(dead_path), data_dir, dead_filename);
+
+                if (lygus_unlink(dead_path) == 0) {
                     LOG_INFO_SIMPLE(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_RECOVERY,
                                    0, segments[j]);
-                } else if (errno != ENOENT) {
+                } else if (lygus_path_exists(dead_path)) {
+                    // File exists but couldn't delete
                     LOG_ERROR(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_CORRUPTION,
                              0, segments[j], NULL, 0);
                     free(segments);
@@ -440,14 +428,13 @@ int wal_recover(const char *data_dir,
 
             break;
         }
-    }  // This is the end of the for loop
+    }
 
-    // Now we're outside the loop, cleanup and return
     free(segments);
 
-    uint64_t end_ns = lygus_now_ns();
+    uint64_t end_ns = lygus_monotonic_ns();
 
-    // Log recovery stats WITH TIMING
+    // Log recovery stats with timing
     struct {
         uint64_t highest_index;
         uint64_t num_entries;
@@ -457,7 +444,7 @@ int wal_recover(const char *data_dir,
         .highest_index = result->highest_index,
         .num_entries = result->num_entries,
         .num_blocks = result->num_blocks,
-        .recovery_time_ms = lygus_ns_to_ms(end_ns - start_ns),
+        .recovery_time_ms = (uint32_t)((end_ns - start_ns) / 1000000),
     };
     LOG_INFO(LYGUS_MODULE_WAL, LYGUS_EVENT_WAL_RECOVERY,
              result->highest_term, result->highest_index,
