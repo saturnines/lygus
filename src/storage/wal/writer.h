@@ -7,6 +7,7 @@
 
 #include "block_format.h"
 #include "../../public/lygus_errors.h"
+#include "platform/platform.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -216,6 +217,15 @@ int wal_writer_block_is_empty(const wal_writer_t *w);
  * @return   1 if everything is durable, 0 if there's unflushed data
  */
 int wal_writer_is_durable(const wal_writer_t *w);
+
+
+    /**
+ * Get file descriptor for current segment
+ *
+ * @param w  Writer handle
+ * @return   File descriptor, or LYGUS_INVALID_FD if invalid
+ */
+lygus_fd_t wal_writer_get_fd(const wal_writer_t *w);
 
 #ifdef __cplusplus
 }

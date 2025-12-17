@@ -545,3 +545,7 @@ size_t wal_writer_block_fill(const wal_writer_t *w) {
 int wal_writer_block_is_empty(const wal_writer_t *w) {
     return w ? (w->block_fill == 0) : 1;
 }
+
+lygus_fd_t wal_writer_get_fd(const wal_writer_t *w) {
+    return w ? w->fd : LYGUS_INVALID_FD;
+}
