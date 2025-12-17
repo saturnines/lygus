@@ -640,56 +640,48 @@ int wal_get_recovery_result(const wal_t *w, wal_recovery_result_t *result) {
 int wal_read_entry(wal_t *w, uint64_t index, wal_entry_t *entry,
                    uint8_t *buf, size_t buf_cap)
 {
-    if (!w || !entry || !buf) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
+    if (!w || !entry || !buf) return LYGUS_ERR_INVALID_ARG;
+    if (buf_cap < WAL_BLOCK_SIZE) return LYGUS_ERR_INVALID_ARG;
 
-    if (buf_cap < WAL_BLOCK_SIZE) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
-
-    // Look up entry location in index
     wal_entry_loc_t loc;
     int ret = wal_index_lookup(w->index, index, &loc);
-    if (ret != LYGUS_OK) {
-        return ret;
-    }
+    if (ret != LYGUS_OK) return ret;
 
-    // Build segment path
     char path[512];
     get_segment_path(w->data_dir, loc.segment_num, path, sizeof(path));
 
-    // Open segment file
     lygus_fd_t fd;
     int need_close = 0;
-
     uint64_t current_seg = wal_writer_segment_num(w->writer);
+
     if (loc.segment_num == current_seg) {
         fd = wal_writer_get_fd(w->writer);
     } else {
         fd = lygus_file_open(path, LYGUS_O_RDONLY, 0);
-        if (fd == LYGUS_INVALID_FD) {
-            return LYGUS_ERR_IO;
-        }
+        if (fd == LYGUS_INVALID_FD) return LYGUS_ERR_IO;
         need_close = 1;
     }
 
-    // Read block header
     wal_block_hdr_t hdr;
     int64_t n = lygus_file_pread(fd, &hdr, sizeof(hdr), loc.block_offset);
+
+    if (n < (int64_t)sizeof(hdr) && loc.segment_num == current_seg) {
+        if (lygus_file_barrier(fd) == 0) {
+            n = lygus_file_pread(fd, &hdr, sizeof(hdr), loc.block_offset);
+        }
+    }
+
     if (n != sizeof(hdr)) {
         if (need_close) lygus_file_close(fd);
         return LYGUS_ERR_IO;
     }
 
-    // Validate header
     ret = wal_block_validate_header(&hdr);
     if (ret != LYGUS_OK) {
         if (need_close) lygus_file_close(fd);
         return ret;
     }
 
-    // Read compressed payload
     uint8_t comp_buf[WAL_BLOCK_SIZE + 1024];
     if (hdr.comp_len > sizeof(comp_buf)) {
         if (need_close) lygus_file_close(fd);
@@ -697,40 +689,26 @@ int wal_read_entry(wal_t *w, uint64_t index, wal_entry_t *entry,
     }
 
     n = lygus_file_pread(fd, comp_buf, hdr.comp_len, loc.block_offset + sizeof(hdr));
-    if (n != (int64_t)hdr.comp_len) {
-        if (need_close) lygus_file_close(fd);
-        return LYGUS_ERR_IO;
+
+    if (n < (int64_t)hdr.comp_len && loc.segment_num == current_seg) {
+        if (lygus_file_barrier(fd) == 0) {
+            n = lygus_file_pread(fd, comp_buf, hdr.comp_len, loc.block_offset + sizeof(hdr));
+        }
     }
 
-    if (need_close) {
-        lygus_file_close(fd);
-    }
+    if (need_close) lygus_file_close(fd);
 
-    // Decompress block
-    ssize_t decompressed = wal_block_decompress(&hdr, comp_buf, w->zctx,
-                                                 buf, buf_cap);
-    if (decompressed < 0) {
-        return (int)decompressed;
-    }
+    if (n != (int64_t)hdr.comp_len) return LYGUS_ERR_IO;
 
-    // Iterate through entries to find the one we want
+    ssize_t decompressed = wal_block_decompress(&hdr, comp_buf, w->zctx, buf, buf_cap);
+    if (decompressed < 0) return (int)decompressed;
+
     size_t offset = 0;
     while (offset < (size_t)decompressed) {
         ret = wal_block_next_entry(buf, decompressed, &offset, entry);
-        if (ret == LYGUS_ERR_INCOMPLETE) {
-            return LYGUS_ERR_KEY_NOT_FOUND;
-        }
-        if (ret != LYGUS_OK) {
-            return ret;
-        }
-
-        if (entry->index == index) {
-            return LYGUS_OK;
-        }
-
-        if (entry->index > index) {
-            return LYGUS_ERR_KEY_NOT_FOUND;
-        }
+        if (ret != LYGUS_OK) return ret;
+        if (entry->index == index) return LYGUS_OK;
+        if (entry->index > index) return LYGUS_ERR_KEY_NOT_FOUND;
     }
 
     return LYGUS_ERR_KEY_NOT_FOUND;
