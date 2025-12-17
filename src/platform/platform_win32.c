@@ -89,24 +89,25 @@ int64_t lygus_file_write(lygus_fd_t fd, const void *buf, size_t len) {
 int64_t lygus_file_pread(lygus_fd_t fd, void *buf, size_t len, uint64_t offset) {
     if (fd < 0 || !buf) return -1;
 
-    // Windows doesn't have pread, so we emulate with seek+read+seek
-    // This is NOT thread-safe for concurrent reads on the same fd!
-    // For thread safety, use native Windows APIs with OVERLAPPED
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return -1;
 
-    int64_t old_pos = _lseeki64(fd, 0, SEEK_CUR);
-    if (old_pos < 0) return -1;
+    OVERLAPPED overlapped = {0};
+    overlapped.Offset = (DWORD)(offset & 0xFFFFFFFF);
+    overlapped.OffsetHigh = (DWORD)(offset >> 32);
 
-    if (_lseeki64(fd, (int64_t)offset, SEEK_SET) < 0) {
+    DWORD bytesRead = 0;
+    // Native ReadFile with OVERLAPPED is the "real" pread on Windows.
+    // It ignores the current file pointer and does not move it.
+    if (!ReadFile(h, buf, (DWORD)len, &bytesRead, &overlapped)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_HANDLE_EOF) return 0;
         return -1;
     }
 
-    int64_t result = lygus_file_read(fd, buf, len);
-
-    // Restore position
-    _lseeki64(fd, old_pos, SEEK_SET);
-
-    return result;
+    return (int64_t)bytesRead;
 }
+
 
 int64_t lygus_file_pwrite(lygus_fd_t fd, const void *buf, size_t len, uint64_t offset) {
     if (fd < 0 || !buf) return -1;
@@ -146,6 +147,19 @@ int lygus_file_sync(lygus_fd_t fd) {
     if (fd < 0) return -1;
     return _commit(fd);
 }
+int lygus_file_barrier(lygus_fd_t fd) {
+    if (fd < 0) return -1;
+
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(h, &info)) {
+        return -1;
+    }
+    return 0;
+}
+
 
 int lygus_file_truncate(lygus_fd_t fd, uint64_t size) {
     if (fd < 0) return -1;
@@ -221,17 +235,16 @@ int lygus_file_unlock(lygus_fd_t fd) {
 int64_t lygus_file_size(lygus_fd_t fd) {
     if (fd < 0) return -1;
 
-    // Save and restore position
-    int64_t old_pos = _lseeki64(fd, 0, SEEK_CUR);
-    if (old_pos < 0) return -1;
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return -1;
 
-    int64_t size = _lseeki64(fd, 0, SEEK_END);
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(h, &size)) {
+        return -1;
+    }
 
-    _lseeki64(fd, old_pos, SEEK_SET);
-
-    return size;
+    return (int64_t)size.QuadPart;
 }
-
 // ============================================================================
 // Filesystem Operations
 // ============================================================================
@@ -286,7 +299,7 @@ lygus_dir_t* lygus_dir_open(const char *path) {
     if (!dir) return NULL;
 
     // Build search pattern: "path\*"
-    snprintf(dir->pattern, sizeof(dir->pattern), "%s\\*", path);
+    snprintf(dir->pattern, sizeof(dir->pattern), "%s/*", path);
 
     dir->handle = FindFirstFileA(dir->pattern, &dir->find_data);
     if (dir->handle == INVALID_HANDLE_VALUE) {
@@ -348,7 +361,7 @@ const char* lygus_path_separator(void) {
 int lygus_path_join(char *out, size_t out_len, const char *dir, const char *file) {
     if (!out || !dir || !file || out_len == 0) return -1;
 
-    int n = snprintf(out, out_len, "%s\\%s", dir, file);
+    int n = snprintf(out, out_len, "%s/%s", dir, file);  // Just use /
     if (n < 0 || (size_t)n >= out_len) {
         return -1;
     }

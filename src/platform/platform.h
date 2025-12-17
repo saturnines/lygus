@@ -212,6 +212,17 @@ int lygus_rename(const char *old_path, const char *new_path);
  */
 int lygus_path_exists(const char *path);
 
+    /**
+ * Force a visibility barrier for file metadata.
+ * * Ensures that the kernel refreshes its view of the file size and
+ * metadata. Call this if a read fails on a file that is currently
+ * being grown by another handle.
+ *
+ * @param fd  File descriptor
+ * @return    0 on success, -1 on error
+ */
+int lygus_file_barrier(lygus_fd_t fd);
+
 // ============================================================================
 // Directory Iteration
 // ============================================================================

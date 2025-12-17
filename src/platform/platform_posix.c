@@ -21,6 +21,7 @@
 #include <sys/types.h>
 #include <sys/file.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 
 #ifdef __linux__
 #include <sys/syscall.h>
@@ -142,6 +143,21 @@ int64_t lygus_file_size(lygus_fd_t fd) {
     if (fstat(fd, &st) < 0) return -1;
 
     return (int64_t)st.st_size;
+}
+
+/**
+ * Force a visibility barrier for file metadata on POSIX.
+ */
+int lygus_file_barrier(lygus_fd_t fd) {
+    if (fd < 0) return -1;
+
+    struct stat st;
+    // forces the kernel to refresh the internal i_size attribute.
+    if (fstat(fd, &st) < 0) {
+        return -1;
+    }
+
+    return 0;
 }
 
 // ============================================================================
