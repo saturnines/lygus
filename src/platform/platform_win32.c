@@ -97,8 +97,6 @@ int64_t lygus_file_pread(lygus_fd_t fd, void *buf, size_t len, uint64_t offset) 
     overlapped.OffsetHigh = (DWORD)(offset >> 32);
 
     DWORD bytesRead = 0;
-    // Native ReadFile with OVERLAPPED is the "real" pread on Windows.
-    // It ignores the current file pointer and does not move it.
     if (!ReadFile(h, buf, (DWORD)len, &bytesRead, &overlapped)) {
         DWORD err = GetLastError();
         if (err == ERROR_HANDLE_EOF) return 0;
@@ -112,21 +110,19 @@ int64_t lygus_file_pread(lygus_fd_t fd, void *buf, size_t len, uint64_t offset) 
 int64_t lygus_file_pwrite(lygus_fd_t fd, const void *buf, size_t len, uint64_t offset) {
     if (fd < 0 || !buf) return -1;
 
-    // Same caveat as pread - not thread-safe
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return -1;
 
-    int64_t old_pos = _lseeki64(fd, 0, SEEK_CUR);
-    if (old_pos < 0) return -1;
+    OVERLAPPED ov = {0};
+    ov.Offset = (DWORD)(offset & 0xFFFFFFFF);
+    ov.OffsetHigh = (DWORD)(offset >> 32);
 
-    if (_lseeki64(fd, (int64_t)offset, SEEK_SET) < 0) {
+    DWORD bytes_written = 0;
+    if (!WriteFile(h, buf, (DWORD)len, &bytes_written, &ov)) {
         return -1;
     }
 
-    int64_t result = lygus_file_write(fd, buf, len);
-
-    // Restore position
-    _lseeki64(fd, old_pos, SEEK_SET);
-
-    return result;
+    return (int64_t)bytes_written;
 }
 
 int64_t lygus_file_seek(lygus_fd_t fd, int64_t offset, int whence) {
