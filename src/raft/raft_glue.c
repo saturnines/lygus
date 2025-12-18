@@ -462,7 +462,7 @@ int glue_send_appendentries(void *ctx, int peer_id,
     if (!g || !g->network || !req) return LYGUS_ERR_INVALID_ARG;
 
     // Calculate total size needed
-    // Format: [ae_req][n_entries:4][entry0_term:8][entry0_type:1][entry0_len:4][entry0_data]...
+    // Format: [ae_req][n_entries:4][entry0_term:8][entry0_type:1][entry0_len:4][entry0_data]..
     size_t total_size = sizeof(*req) + 4;  // Header + entry count
 
     for (size_t i = 0; i < n_entries; i++) {
