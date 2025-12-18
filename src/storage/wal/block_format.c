@@ -76,10 +76,22 @@ ssize_t wal_entry_encode(wal_entry_type_t type, uint64_t index, uint64_t term,
     out[pos++] = (uint8_t)type;
 
     // Encode varints
-    pos += varint_encode(index, &out[pos]);
-    pos += varint_encode(term, &out[pos]);
-    pos += varint_encode(klen, &out[pos]);
-    pos += varint_encode(vlen, &out[pos]);
+    ssize_t ret;
+    ret = varint_encode(index, &out[pos], out_len - pos);
+    if (ret < 0) return ret;
+    pos += (size_t)ret;
+
+    ret = varint_encode(term, &out[pos], out_len - pos);
+    if (ret < 0) return ret;
+    pos += (size_t)ret;
+
+    ret = varint_encode(klen, &out[pos], out_len - pos);
+    if (ret < 0) return ret;
+    pos += (size_t)ret;
+
+    ret = varint_encode(vlen, &out[pos], out_len - pos);
+    if (ret < 0) return ret;
+    pos += (size_t)ret;
 
     // Copy key
     if (klen > 0) {
