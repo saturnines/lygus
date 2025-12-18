@@ -3,7 +3,7 @@
  *
  * Uses ZeroMQ for messaging:
  *   - DEALER/ROUTER for Raft RPCs (reliable, async)
- *   - PUB/SUB for Hermes INV broadcasts (lossy, fire-and-forget)
+ *   - PUB/SUB for INV broadcasts (lossy, fire-and-forget)
  *
  * Port scheme:
  *   - Raft: 5000 + node_id
@@ -117,13 +117,13 @@ int network_recv_raft(network_t *net, int *from_id, uint8_t *msg_type,
                       void *buf, size_t buf_cap);
 
 // ============================================================================
-// Hermes INV Broadcasts (PUB/SUB)
+// INV Broadcasts (PUB/SUB)
 // ============================================================================
 
 /**
  * Broadcast key invalidation to all peers
  *
- * Fire-and-forget. Lost messages are OK (Hermes is advisory).
+ * Fire-and-forget. Lost messages are OK.
  *
  * @param net   Network handle
  * @param key   Key being invalidated
