@@ -263,6 +263,14 @@ uint64_t storage_mgr_logged_index(const storage_mgr_t *mgr);
 uint64_t storage_mgr_logged_term(const storage_mgr_t *mgr);
 
 /**
+ * Get first index in log (after snapshot compaction)
+ *
+ * Returns snapshot_index + 1, or 1 if no snapshot.
+ * This is the first index that can be read from WAL.
+ */
+uint64_t storage_mgr_first_index(const storage_mgr_t *mgr);
+
+/**
  * Check if async snapshot is in progress (always false on Windows)
  */
 int storage_mgr_snapshot_in_progress(const storage_mgr_t *mgr);
@@ -276,6 +284,30 @@ size_t storage_mgr_wal_size(const storage_mgr_t *mgr);
  * Replay WAL entries up to target_index
  */
 int storage_mgr_replay_to(storage_mgr_t *mgr, uint64_t target_index);
+
+// ============================================================================
+// Log Access (for Raft replication)
+// ============================================================================
+
+/**
+ * Read a log entry by index
+ *
+ * Retrieves entry data in serialized glue format:
+ *   [type:1][klen:4][vlen:4][key][value]
+ *
+ * Type values: 1=PUT, 2=DEL, 3=NOOP
+ *
+ * @param mgr       Storage manager
+ * @param index     Entry index to read
+ * @param term_out  Output: entry term (can be NULL)
+ * @param buf       Output buffer for serialized entry
+ * @param buf_cap   Buffer capacity
+ * @return Bytes written to buf on success
+ *         Negative of needed size if buffer too small
+ *         Negative error code on failure
+ */
+ssize_t storage_mgr_log_get(storage_mgr_t *mgr, uint64_t index,
+                            uint64_t *term_out, void *buf, size_t buf_cap);
 
 // ============================================================================
 // Log Truncation (for Raft conflicts)

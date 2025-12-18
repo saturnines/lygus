@@ -983,6 +983,114 @@ size_t storage_mgr_wal_size(const storage_mgr_t *mgr)
 }
 
 // ============================================================================
+// Log Access (for Raft replication)
+// ============================================================================
+
+// Entry type mapping from WAL to glue format
+#define GLUE_ENTRY_PUT   1
+#define GLUE_ENTRY_DEL   2
+#define GLUE_ENTRY_NOOP  3
+
+uint64_t storage_mgr_first_index(const storage_mgr_t *mgr)
+{
+    if (!mgr) {
+        return 0;
+    }
+
+    // First readable index is one after snapshot
+    // (entries at or before snapshot_index are compacted away)
+    if (mgr->snapshot_index > 0) {
+        return mgr->snapshot_index + 1;
+    }
+
+    // No snapshot - first index is 1 (if any entries exist)
+    return (mgr->logged_index > 0) ? 1 : 0;
+}
+
+ssize_t storage_mgr_log_get(storage_mgr_t *mgr, uint64_t index,
+                            uint64_t *term_out, void *buf, size_t buf_cap)
+{
+    if (!mgr || !mgr->wal) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // Check index bounds
+    uint64_t first = storage_mgr_first_index(mgr);
+    if (index < first || index > mgr->logged_index) {
+        return LYGUS_ERR_KEY_NOT_FOUND;
+    }
+
+    // Read entry from WAL
+    uint8_t wal_buf[WAL_BLOCK_SIZE];
+    wal_entry_t entry;
+
+    int ret = wal_read_entry(mgr->wal, index, &entry, wal_buf, sizeof(wal_buf));
+    if (ret != LYGUS_OK) {
+        return ret;
+    }
+
+    // Return term
+    if (term_out) {
+        *term_out = entry.term;
+    }
+
+    // Calculate serialized size: [type:1][klen:4][vlen:4][key][value]
+    size_t klen = entry.klen;
+    size_t vlen = entry.vlen;
+    size_t needed = 1 + 4 + 4 + klen + vlen;  // 9 byte header + data
+
+    // If no buffer or too small, return needed size
+    if (!buf || buf_cap < needed) {
+        return -(ssize_t)needed;
+    }
+
+    // Serialize entry
+    uint8_t *p = (uint8_t *)buf;
+
+    // Type mapping
+    uint8_t glue_type;
+    switch (entry.type) {
+        case WAL_ENTRY_PUT:
+            glue_type = GLUE_ENTRY_PUT;
+            break;
+        case WAL_ENTRY_DEL:
+            glue_type = GLUE_ENTRY_DEL;
+            break;
+        case WAL_ENTRY_NOOP_SYNC:
+        case WAL_ENTRY_SNAP_MARK:
+            glue_type = GLUE_ENTRY_NOOP;
+            klen = 0;
+            vlen = 0;
+            break;
+        default:
+            glue_type = GLUE_ENTRY_NOOP;
+            klen = 0;
+            vlen = 0;
+            break;
+    }
+
+    // Write header
+    p[0] = glue_type;
+
+    uint32_t klen32 = (uint32_t)klen;
+    uint32_t vlen32 = (uint32_t)vlen;
+    memcpy(p + 1, &klen32, 4);
+    memcpy(p + 5, &vlen32, 4);
+
+    // Write key
+    if (klen > 0 && entry.key) {
+        memcpy(p + 9, entry.key, klen);
+    }
+
+    // Write value
+    if (vlen > 0 && entry.val) {
+        memcpy(p + 9 + klen, entry.val, vlen);
+    }
+
+    return (ssize_t)(9 + klen + vlen);
+}
+
+// ============================================================================
 // Log Truncation
 // ============================================================================
 
