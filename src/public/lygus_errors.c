@@ -24,6 +24,7 @@ const char* lygus_strerror(lygus_err_t err) {
         case LYGUS_ERR_OVERFLOW:      return "Integer overflow";
         case LYGUS_ERR_MALFORMED:     return "Malformed data";
         case LYGUS_ERR_INCOMPLETE:    return "Incomplete data";
+        case LYGUS_ERR_BUFFER_TOO_SMALL: return "Buffer too small";
 
         // WAL-specific errors
         case LYGUS_ERR_WAL_FULL:      return "WAL segment full";

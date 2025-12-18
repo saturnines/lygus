@@ -48,6 +48,7 @@ typedef enum {
   LYGUS_ERR_OVERFLOW      = -18,  // Integer overflow (varint, index)
   LYGUS_ERR_MALFORMED     = -19,  // Malformed data (invalid varint, bad block header)
   LYGUS_ERR_INCOMPLETE    = -20,  // Incomplete data (buffer too short)
+  LYGUS_ERR_BUFFER_TOO_SMALL = -21,
 
   // ============================================================================
   // WAL-specific errors (30-39)
