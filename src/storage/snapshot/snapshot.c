@@ -111,11 +111,22 @@ int snapshot_write(lygus_kv_t *kv,
 
     while (lygus_kv_iter_next(&it, &key, &klen, &val, &vlen)) {
         // Encode klen and vlen as varints
-        uint8_t varint_buf[VARINT_MAX_BYTES * 2];
+        uint8_t varint_buf[VARINT_MAX_LEN * 2];
         size_t pos = 0;
 
-        pos += varint_encode(klen, &varint_buf[pos]);
-        pos += varint_encode(vlen, &varint_buf[pos]);
+        ssize_t ret = varint_encode(klen, &varint_buf[pos], sizeof(varint_buf) - pos);
+        if (ret < 0) {
+            ret = LYGUS_ERR_INTERNAL;
+            goto cleanup;
+        }
+        pos += (size_t)ret;
+
+        ret = varint_encode(vlen, &varint_buf[pos], sizeof(varint_buf) - pos);
+        if (ret < 0) {
+            ret = LYGUS_ERR_INTERNAL;
+            goto cleanup;
+        }
+        pos += (size_t)ret;
 
         // Write varints
         if (write_all(fd, varint_buf, pos) < 0) {
@@ -232,12 +243,12 @@ int snapshot_load(const char *path,
     // Read entries
     for (uint64_t i = 0; i < hdr.entry_count; i++) {
         // Read varints for klen and vlen
-        uint8_t varint_buf[VARINT_MAX_BYTES];
+        uint8_t varint_buf[VARINT_MAX_LEN];
         uint64_t klen = 0, vlen = 0;
 
         // Read klen varint
         size_t varint_pos = 0;
-        while (varint_pos < VARINT_MAX_BYTES) {
+        while (varint_pos < VARINT_MAX_LEN) {
             if (read_all(fd, &varint_buf[varint_pos], 1) < 0) {
                 ret = LYGUS_ERR_READ;
                 goto cleanup;
@@ -249,7 +260,7 @@ int snapshot_load(const char *path,
                 crc = crc32c_update(crc, varint_buf, varint_pos);
                 break;
             }
-            if (decoded < 0 && decoded != LYGUS_ERR_INCOMPLETE) {
+            if (decoded < 0 && decoded != LYGUS_ERR_BUFFER_TOO_SMALL) {
                 ret = LYGUS_ERR_MALFORMED;
                 goto cleanup;
             }
@@ -257,7 +268,7 @@ int snapshot_load(const char *path,
 
         // Read vlen varint
         varint_pos = 0;
-        while (varint_pos < VARINT_MAX_BYTES) {
+        while (varint_pos < VARINT_MAX_LEN) {
             if (read_all(fd, &varint_buf[varint_pos], 1) < 0) {
                 ret = LYGUS_ERR_READ;
                 goto cleanup;
@@ -269,7 +280,7 @@ int snapshot_load(const char *path,
                 crc = crc32c_update(crc, varint_buf, varint_pos);
                 break;
             }
-            if (decoded < 0 && decoded != LYGUS_ERR_INCOMPLETE) {
+            if (decoded < 0 && decoded != LYGUS_ERR_BUFFER_TOO_SMALL) {
                 ret = LYGUS_ERR_MALFORMED;
                 goto cleanup;
             }
