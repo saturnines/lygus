@@ -349,18 +349,7 @@ void lygus_sleep_us(uint64_t us);
 // Time Utilities
 // ============================================================================
 
-/**
- * Get monotonic timestamp in nanoseconds
- *
- * @return  Nanoseconds since arbitrary epoch (monotonic, not wall clock)
- */
 uint64_t lygus_monotonic_ns(void);
-
-/**
- * Get wall clock timestamp in nanoseconds (for logging)
- *
- * @return  Nanoseconds since Unix epoch
- */
 uint64_t lygus_realtime_ns(void);
 
 // ============================================================================
