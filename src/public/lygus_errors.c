@@ -33,6 +33,7 @@ const char* lygus_strerror(lygus_err_t err) {
         case LYGUS_ERR_BAD_BLOCK:     return "Bad block header";
         case LYGUS_ERR_DECOMPRESS:    return "Decompression failed";
         case LYGUS_ERR_COMPRESS:      return "Compression failed";
+        case LYGUS_ERR_OUT_OF_ORDER:  return "Index out of order";
 
         // Snapshot errors
         case LYGUS_ERR_SNAPSHOT:      return "Snapshot creation failed";

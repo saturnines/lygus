@@ -59,6 +59,7 @@ typedef enum {
   LYGUS_ERR_BAD_BLOCK     = -33,  // Bad block header (magic, CRC)
   LYGUS_ERR_DECOMPRESS    = -34,  // Decompression failed
   LYGUS_ERR_COMPRESS      = -35,  // Compression failed
+  LYGUS_ERR_OUT_OF_ORDER  = -36,
 
   // ============================================================================
   // Snapshot errors (40-49)
