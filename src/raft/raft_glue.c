@@ -6,10 +6,15 @@
 #include "network/wire_format.h"
 #include "platform/platform.h"
 #include "public/lygus_errors.h"
+#include "../state/kv_op.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+// STATIC SCRATCH BUFFER: Avoids malloc/free on every heartbeat.
+// 128KB is enough for a large batch of entries.
+static uint8_t scratch_buf[131072];
 
 // ============================================================================
 // Lifecycle
@@ -294,36 +299,13 @@ int glue_log_append(void *ctx, uint64_t index, uint64_t term,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    // Handle NOOP entries (from Raft directly, data may be NULL)
+
     if (data == NULL || len == 0) {
         return storage_mgr_log_noop(g->storage, index, term);
     }
 
-    // Parse the serialized entry
-    uint8_t type;
-    uint32_t klen, vlen;
-    const void *key, *val;
-
-    int ret = glue_parse_entry(data, len, &type, &klen, &vlen, &key, &val);
-    if (ret != LYGUS_OK) {
-        return ret;
-    }
-
-    // Dispatch to appropriate storage function
-    switch (type) {
-        case GLUE_ENTRY_PUT:
-            return storage_mgr_log_put(g->storage, index, term,
-                                       key, klen, val, vlen);
-
-        case GLUE_ENTRY_DEL:
-            return storage_mgr_log_del(g->storage, index, term, key, klen);
-
-        case GLUE_ENTRY_NOOP:
-            return storage_mgr_log_noop(g->storage, index, term);
-
-        default:
-            return LYGUS_ERR_MALFORMED;
-    }
+    //  (serialized kv_op)
+    return storage_mgr_log_raw(g->storage, index, term, data, len);
 }
 
 int glue_log_get(void *ctx, uint64_t index, void *buf, size_t *len) {
@@ -397,24 +379,12 @@ int glue_apply_entry(void *ctx, uint64_t index, uint64_t term,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    // Handle Raft-level NOOP
-    if (type == RAFT_ENTRY_NOOP) {
+    // Handle Raft NOOP
+    if (type == RAFT_ENTRY_NOOP || data == NULL || len == 0) {
         return storage_mgr_apply_noop(g->storage, index, term);
     }
 
-    // Handle config changes (not implemented yet)
-    if (type == RAFT_ENTRY_CONFIG) {
-        // TODO: Handle configuration changes
-        // For now, just advance applied index
-        return storage_mgr_apply_noop(g->storage, index, term);
-    }
-
-    // DATA entry - parse and apply
-    if (data == NULL || len == 0) {
-        // Empty data entry - treat as NOOP
-        return storage_mgr_apply_noop(g->storage, index, term);
-    }
-
+    // Deserialize KV operation
     uint8_t entry_type;
     uint32_t klen, vlen;
     const void *key, *val;
@@ -472,11 +442,12 @@ int glue_send_appendentries(void *ctx, int peer_id,
         }
     }
 
-    // Allocate buffer
-    uint8_t *buf = malloc(total_size);
-    if (!buf) return LYGUS_ERR_NOMEM;
+    //  STATIC BUFFER to avoid malloc/free thrashing
+    if (total_size > sizeof(scratch_buf)) {
+        return LYGUS_ERR_NOMEM;
+    }
 
-    uint8_t *p = buf;
+    uint8_t *p = scratch_buf;
 
     // Copy AE request header
     memcpy(p, req, sizeof(*req));
@@ -508,10 +479,9 @@ int glue_send_appendentries(void *ctx, int peer_id,
         }
     }
 
-    int ret = network_send_raft(g->network, peer_id, MSG_APPENDENTRIES_REQ,
-                                buf, total_size);
-    free(buf);
-    return ret;
+    // Send using scratch buffer
+    return network_send_raft(g->network, peer_id, MSG_APPENDENTRIES_REQ,
+                                scratch_buf, total_size);
 }
 
 // ============================================================================
@@ -576,10 +546,21 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                     // Parse entries
                     raft_entry_t *entries = NULL;
                     if (n_entries > 0) {
+                        // SANITY CHECK: Min entry size is 13 bytes (8 term + 1 type + 4 len)
+                        if (n_entries > sizeof(buf) / 13) {
+                             break;
+                        }
+
                         entries = calloc(n_entries, sizeof(raft_entry_t));
                         if (!entries) break;
 
+                        int malformed = 0;
                         for (uint32_t i = 0; i < n_entries; i++) {
+                            if (p + 13 > buf + len) {
+                                malformed = 1;
+                                break;
+                            }
+
                             memcpy(&entries[i].term, p, 8);
                             p += 8;
 
@@ -590,21 +571,35 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                             p += 4;
 
                             entries[i].len = data_len;
+
+                            // BOUNDS CHECK 2: Payload
                             if (data_len > 0) {
+                                if (p + data_len > buf + len) {
+                                    malformed = 1;
+                                    break;
+                                }
                                 entries[i].data = p;
                                 p += data_len;
                             }
                         }
+
+                        if (!malformed) {
+                            raft_appendentries_resp_t resp;
+                            raft_recv_appendentries(raft, req, entries, n_entries, &resp);
+
+                            // Send response back
+                            network_send_raft(ctx->network, from_id, MSG_APPENDENTRIES_RESP,
+                                              &resp, sizeof(resp));
+                        }
+
+                        free(entries);
+                    } else {
+                        // Heartbeat (0 entries)
+                        raft_appendentries_resp_t resp;
+                        raft_recv_appendentries(raft, req, NULL, 0, &resp);
+                        network_send_raft(ctx->network, from_id, MSG_APPENDENTRIES_RESP,
+                                            &resp, sizeof(resp));
                     }
-
-                    raft_appendentries_resp_t resp;
-                    raft_recv_appendentries(raft, req, entries, n_entries, &resp);
-
-                    free(entries);
-
-                    // Send response back
-                    network_send_raft(ctx->network, from_id, MSG_APPENDENTRIES_RESP,
-                                      &resp, sizeof(resp));
                 }
                 break;
             }
