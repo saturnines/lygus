@@ -32,6 +32,7 @@
 #include "../state/kv_store.h"
 #include "../public/lygus_errors.h"
 #include "../util/logging.h"
+#include "../state/kv_op.h"
 
 // ============================================================================
 // Internal Structure
@@ -392,6 +393,60 @@ int storage_mgr_log_noop(storage_mgr_t *mgr,
     mgr->logged_index = index;
     mgr->logged_term = term;
     mgr->wal_bytes_written += 20;
+
+    return LYGUS_OK;
+}
+
+int storage_mgr_log_raw(storage_mgr_t *mgr,
+                        uint64_t index, uint64_t term,
+                        const void *data, size_t len) {
+    if (!mgr || !data || len == 0) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    if (index != mgr->logged_index + 1) {
+        return LYGUS_ERR_OUT_OF_ORDER;
+    }
+
+    kv_op_type_t op_type;
+    const void *key, *val;
+    uint32_t klen, vlen;
+
+    int ret = kv_op_deserialize(data, len, &op_type, &key, &klen, &val, &vlen);
+    if (ret != 0) {
+        return LYGUS_ERR_MALFORMED;
+    }
+
+    switch (op_type) {
+        case KV_OP_PUT:
+            ret = wal_put(mgr->wal, index, term, key, klen, val, vlen);
+            if (ret != LYGUS_OK) return ret;
+            mgr->wal_bytes_written += 32 + klen + vlen;
+            break;
+
+        case KV_OP_DEL:
+            ret = wal_del(mgr->wal, index, term, key, klen);
+            if (ret != LYGUS_OK) return ret;
+            mgr->wal_bytes_written += 24 + klen;
+            break;
+
+        case KV_OP_NOOP:
+            ret = wal_noop_sync(mgr->wal, index, term);
+            if (ret != LYGUS_OK) return ret;
+            mgr->wal_bytes_written += 20;
+            break;
+
+        default:
+            return LYGUS_ERR_MALFORMED;
+    }
+
+    ret = wal_fsync(mgr->wal);
+    if (ret != LYGUS_OK) {
+        return ret;
+    }
+
+    mgr->logged_index = index;
+    mgr->logged_term = term;
 
     return LYGUS_OK;
 }

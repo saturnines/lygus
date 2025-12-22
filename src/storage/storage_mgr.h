@@ -117,6 +117,13 @@ int storage_mgr_log_del(storage_mgr_t *mgr,
 int storage_mgr_log_noop(storage_mgr_t *mgr,
                          uint64_t index, uint64_t term);
 
+    /**
+ * Log raw opaque bytes to WAL (used by Raft for KV ops)
+ */
+int storage_mgr_log_raw(storage_mgr_t *mgr,
+                        uint64_t index, uint64_t term,
+                        const void *data, size_t len);
+
 // ============================================================================
 // Moment 2: Apply Operations (after commit)
 // ============================================================================
