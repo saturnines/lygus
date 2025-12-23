@@ -101,7 +101,7 @@ int mailbox_pop(mailbox_t *mb, mail_t *mail)
 
     *mail = mb->slots[mb->tail];
 
-    // Clear slot (don't free data - ownership transfers to caller)
+    // Clear slot (don't free data, ownership transfers to caller)
     memset(&mb->slots[mb->tail], 0, sizeof(mail_t));
 
     mb->tail = (mb->tail + 1) % mb->capacity;
