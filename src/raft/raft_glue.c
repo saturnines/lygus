@@ -193,8 +193,13 @@ int glue_parse_entry(const void *data, size_t len,
     memcpy(&klen, p + 1, 4);
     memcpy(&vlen, p + 5, 4);
 
-    // Validate total length
-    if (len < GLUE_ENTRY_HEADER_SIZE + klen + vlen) {
+    // Bounds check: klen must fit in remaining buffer
+    if (klen > len - GLUE_ENTRY_HEADER_SIZE) {
+        return LYGUS_ERR_MALFORMED;
+    }
+
+    // Bounds check: vlen must fit after klen
+    if (vlen > len - GLUE_ENTRY_HEADER_SIZE - klen) {
         return LYGUS_ERR_MALFORMED;
     }
 
