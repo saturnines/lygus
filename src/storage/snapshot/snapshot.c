@@ -114,19 +114,19 @@ int snapshot_write(lygus_kv_t *kv,
         uint8_t varint_buf[VARINT_MAX_LEN * 2];
         size_t pos = 0;
 
-        ssize_t ret = varint_encode(klen, &varint_buf[pos], sizeof(varint_buf) - pos);
-        if (ret < 0) {
+        ssize_t n = varint_encode(klen, &varint_buf[pos], sizeof(varint_buf) - pos);
+        if (n < 0) {
             ret = LYGUS_ERR_INTERNAL;
             goto cleanup;
         }
-        pos += (size_t)ret;
+        pos += (size_t)n;
 
-        ret = varint_encode(vlen, &varint_buf[pos], sizeof(varint_buf) - pos);
-        if (ret < 0) {
+        n = varint_encode(vlen, &varint_buf[pos], sizeof(varint_buf) - pos);
+        if (n < 0) {
             ret = LYGUS_ERR_INTERNAL;
             goto cleanup;
         }
-        pos += (size_t)ret;
+        pos += (size_t)n;
 
         // Write varints
         if (write_all(fd, varint_buf, pos) < 0) {
