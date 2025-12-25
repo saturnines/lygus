@@ -165,7 +165,7 @@ static void *network_thread_func(void *arg)
                         };
 
                         if (mailbox_push(net->raft_inbox, &incoming) != 0) {
-                            free(payload_copy); // Drop if inbox full, i think theres an edgecase here
+                            free(payload_copy); // Drop if inbox full, raft should retry
                         }
                     }
                 }
