@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "platform/platform.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -144,6 +145,25 @@ int network_broadcast_inv(network_t *net, const void *key, size_t klen);
  * @return Key length, 0 if none, -1 on error
  */
 int network_recv_inv(network_t *net, int *from_id, void *key_buf, size_t buf_cap);
+
+// ============================================================================
+// Event Loop Integration
+// ============================================================================
+
+/**
+ * Get file descriptor for inbox notification
+ *
+ * @param net  Network handle
+ * @return     Pollable file descriptor, or LYGUS_INVALID_FD if unavailable
+ */
+lygus_fd_t network_get_notify_fd(const network_t *net);
+
+/**
+ * Clear inbox notification
+ *
+ * @param net  Network handle
+ */
+void network_clear_notify(network_t *net);
 
 // ============================================================================
 // Utilities

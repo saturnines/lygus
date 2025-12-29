@@ -1,3 +1,10 @@
+/**
+ * network.c - Network layer implementation
+ *
+ * Uses ZeroMQ for messaging with a background thread.
+ * Inbox notification allows event-driven wakeup instead of polling.
+ */
+
 #include "network.h"
 #include "mailbox.h"
 #include "wire_format.h"
@@ -40,6 +47,9 @@ struct network {
     mailbox_t *raft_inbox;   // Incoming Raft messages
     mailbox_t *raft_outbox;  // Outgoing Raft messages
     mailbox_t *inv_inbox;    // Incoming INV messages
+
+    // Event loop notification
+    lygus_notify_t *inbox_notify;  // Signals main thread when inbox has data
 
     // Thread
     pthread_t net_thread;
@@ -164,7 +174,12 @@ static void *network_thread_func(void *arg)
                             .data = payload_copy,
                         };
 
-                        if (mailbox_push(net->raft_inbox, &incoming) != 0) {
+                        if (mailbox_push(net->raft_inbox, &incoming) == 0) {
+                            // Successfully pushed - notify main thread
+                            if (net->inbox_notify) {
+                                lygus_notify_signal(net->inbox_notify);
+                            }
+                        } else {
                             free(payload_copy); // Drop if inbox full, raft should retry
                         }
                     }
@@ -198,6 +213,8 @@ static void *network_thread_func(void *arg)
                     if (mailbox_push(net->inv_inbox, &incoming) != 0) {
                         free(key_copy);
                     }
+                    // Note: We don't notify for INV messages since they're
+                    // less latency-sensitive than Raft consensus messages
                 }
             }
         }
@@ -219,6 +236,14 @@ network_t *network_create(const network_config_t *cfg)
     net->node_id = cfg->node_id;
     net->num_peers = cfg->num_peers;
     memcpy(net->peers, cfg->peers, cfg->num_peers * sizeof(peer_info_t));
+
+    // Create inbox notification for event loop integration
+    net->inbox_notify = lygus_notify_create();
+    if (!net->inbox_notify) {
+        // Non-fatal: fall back to timer-based polling
+        fprintf(stderr, "Warning: couldn't create inbox notification, "
+                        "falling back to polling\n");
+    }
 
     net->zmq_ctx = zmq_ctx_new();
     if (!net->zmq_ctx) goto fail;
@@ -309,6 +334,8 @@ void network_destroy(network_t *net)
     mailbox_destroy(net->raft_inbox);
     mailbox_destroy(net->raft_outbox);
     mailbox_destroy(net->inv_inbox);
+    lygus_notify_destroy(net->inbox_notify);
+
     free(net);
 }
 
@@ -406,6 +433,25 @@ int network_recv_inv(network_t *net, int *from_id, void *key_buf, size_t buf_cap
 
     free(mail.data);
     return (int)mail.len;
+}
+
+// ============================================================================
+// Event Loop
+// ============================================================================
+
+lygus_fd_t network_get_notify_fd(const network_t *net)
+{
+    if (!net || !net->inbox_notify) {
+        return LYGUS_INVALID_FD;
+    }
+    return lygus_notify_fd(net->inbox_notify);
+}
+
+void network_clear_notify(network_t *net)
+{
+    if (net && net->inbox_notify) {
+        lygus_notify_clear(net->inbox_notify);
+    }
 }
 
 // ============================================================================
