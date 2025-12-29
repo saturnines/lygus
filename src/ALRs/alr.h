@@ -3,7 +3,7 @@
  *
  * Based on:
  * "The LAW Behind ALRs: Redefining Crash-Tolerant Read"
- * (Giortamis et al., VLDB 2025)
+ * (Katsarakis et al., VLDB 2025)
  */
 
 #ifndef LYGUS_ALR_H
