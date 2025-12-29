@@ -27,7 +27,8 @@ add_subdirectory(deps/lil-raft)
 if(WIN32)
     set(PLATFORM_SOURCES src/platform/platform_win32.c)
 else()
-    set(PLATFORM_SOURCES src/platform/platform_posix.c)
+    set(PLATFORM_SOURCES src/platform/platform_posix.c
+            cmd/lygus-server/event_loop.h)
 endif()
 
 # Library
@@ -79,10 +80,25 @@ target_link_libraries(lygus PUBLIC
         libzmq-static
 )
 
-# Platform specific
+# Platform-specific libraries
 if(UNIX AND NOT APPLE)
     target_link_libraries(lygus PUBLIC rt)
 endif()
 if(WIN32)
     target_link_libraries(lygus PUBLIC ws2_32 iphlpapi)
 endif()
+
+# =============================================================================
+# Server Binary
+# =============================================================================
+
+add_executable(lygus-server cmd/lygus-server/main.c
+        cmd/lygus-server/event_loop.c
+        cmd/lygus-server/tcp_server.h
+        cmd/lygus-server/tcp_server.c)
+target_link_libraries(lygus-server lygus)
+
+# Install targets
+install(TARGETS lygus-server RUNTIME DESTINATION bin)
+install(TARGETS lygus ARCHIVE DESTINATION lib)
+install(FILES src/public/lygus.h src/public/lygus_errors.h DESTINATION include/lygus)
