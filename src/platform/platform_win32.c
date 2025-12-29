@@ -8,6 +8,8 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <io.h>
 #include <fcntl.h>
 #include <direct.h>
@@ -16,6 +18,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+
+#pragma comment(lib, "ws2_32.lib")
 
 // ============================================================================
 // Error Helpers
@@ -143,6 +147,7 @@ int lygus_file_sync(lygus_fd_t fd) {
     if (fd < 0) return -1;
     return _commit(fd);
 }
+
 int lygus_file_barrier(lygus_fd_t fd) {
     if (fd < 0) return -1;
 
@@ -241,6 +246,7 @@ int64_t lygus_file_size(lygus_fd_t fd) {
 
     return (int64_t)size.QuadPart;
 }
+
 // ============================================================================
 // Filesystem Operations
 // ============================================================================
@@ -430,6 +436,131 @@ void lygus_sleep_us(uint64_t us) {
     DWORD ms = (DWORD)((us + 999) / 1000);  // Round up
     if (ms == 0) ms = 1;
     Sleep(ms);
+}
+
+// ============================================================================
+// Event Notification
+// ============================================================================
+
+// Ensure Winsock is initialized
+static int winsock_init(void) {
+    static int initialized = 0;
+    if (!initialized) {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+            return -1;
+        }
+        initialized = 1;
+    }
+    return 0;
+}
+
+struct lygus_notify {
+    SOCKET read_sock;
+    SOCKET write_sock;
+    struct sockaddr_in addr;
+};
+
+lygus_notify_t *lygus_notify_create(void) {
+    if (winsock_init() < 0) {
+        return NULL;
+    }
+
+    lygus_notify_t *notify = malloc(sizeof(lygus_notify_t));
+    if (!notify) return NULL;
+
+    // Create a UDP socket pair using loopback
+
+    notify->read_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (notify->read_sock == INVALID_SOCKET) {
+        free(notify);
+        return NULL;
+    }
+
+    // Bind to loopback with ephemeral port
+    memset(&notify->addr, 0, sizeof(notify->addr));
+    notify->addr.sin_family = AF_INET;
+    notify->addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    notify->addr.sin_port = 0;
+
+    if (bind(notify->read_sock, (struct sockaddr *)&notify->addr,
+             sizeof(notify->addr)) == SOCKET_ERROR) {
+        closesocket(notify->read_sock);
+        free(notify);
+        return NULL;
+    }
+
+    // Get the bound port
+    int addrlen = sizeof(notify->addr);
+    if (getsockname(notify->read_sock, (struct sockaddr *)&notify->addr,
+                    &addrlen) == SOCKET_ERROR) {
+        closesocket(notify->read_sock);
+        free(notify);
+        return NULL;
+    }
+
+    // Create write socket and connect to read socket
+    notify->write_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (notify->write_sock == INVALID_SOCKET) {
+        closesocket(notify->read_sock);
+        free(notify);
+        return NULL;
+    }
+
+    if (connect(notify->write_sock, (struct sockaddr *)&notify->addr,
+                sizeof(notify->addr)) == SOCKET_ERROR) {
+        closesocket(notify->read_sock);
+        closesocket(notify->write_sock);
+        free(notify);
+        return NULL;
+    }
+
+    // Set read socket non-blocking
+    u_long mode = 1;
+    ioctlsocket(notify->read_sock, FIONBIO, &mode);
+
+    return notify;
+}
+
+void lygus_notify_destroy(lygus_notify_t *notify) {
+    if (!notify) return;
+
+    if (notify->read_sock != INVALID_SOCKET) {
+        closesocket(notify->read_sock);
+    }
+    if (notify->write_sock != INVALID_SOCKET) {
+        closesocket(notify->write_sock);
+    }
+
+    free(notify);
+}
+
+lygus_fd_t lygus_notify_fd(const lygus_notify_t *notify) {
+    if (!notify) return LYGUS_INVALID_FD;
+    // Note: This returns a SOCKET cast to int. Works with select().
+    return (lygus_fd_t)notify->read_sock;
+}
+
+int lygus_notify_signal(lygus_notify_t *notify) {
+    if (!notify) return -1;
+
+    char c = 1;
+    if (send(notify->write_sock, &c, 1, 0) == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) return 0;
+        return -1;
+    }
+    return 0;
+}
+
+int lygus_notify_clear(lygus_notify_t *notify) {
+    if (!notify) return -1;
+
+    char buf[64];
+    while (recv(notify->read_sock, buf, sizeof(buf), 0) > 0) {
+        // Drain
+    }
+    return 0;
 }
 
 // ============================================================================

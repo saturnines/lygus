@@ -346,6 +346,54 @@ uint32_t lygus_thread_id(void);
 void lygus_sleep_us(uint64_t us);
 
 // ============================================================================
+// Event Notification (for waking up event loops)
+// ============================================================================
+
+/**
+ * Notification handle for cross thread signaling
+ * Uses eventfd on Linux, pipes elsewhere.
+ */
+typedef struct lygus_notify lygus_notify_t;
+
+/**
+ * Create notification object
+ *
+ * @return  Notification handle, or NULL on error
+ */
+lygus_notify_t *lygus_notify_create(void);
+
+/**
+ * Destroy notification object
+ *
+ * @param notify  Notification handle (safe to pass NULL)
+ */
+void lygus_notify_destroy(lygus_notify_t *notify);
+
+/**
+ * Get pollable file descriptor
+ *
+ * This fd becomes readable when lygus_notify_signal() is called.
+ * @param notify  Notification handle
+ * @return        File descriptor, or LYGUS_INVALID_FD on error
+ */
+lygus_fd_t lygus_notify_fd(const lygus_notify_t *notify);
+
+/**
+ * Signal the notification
+ * @param notify  Notification handle
+ * @return        0 on success, -1 on error
+ */
+int lygus_notify_signal(lygus_notify_t *notify);
+
+/**
+ * Clear the notification
+ * @param notify  Notification handle
+ * @return        0 on success, -1 on error
+ */
+int lygus_notify_clear(lygus_notify_t *notify);
+
+
+// ============================================================================
 // Time Utilities
 // ============================================================================
 

@@ -367,6 +367,115 @@ void lygus_sleep_us(uint64_t us) {
 }
 
 // ============================================================================
+// Event Notification
+// ============================================================================
+
+#ifdef __linux__
+#include <sys/eventfd.h>
+#endif
+
+struct lygus_notify {
+#ifdef __linux__
+    int efd;
+#else
+    int read_fd;
+    int write_fd;
+#endif
+};
+
+lygus_notify_t *lygus_notify_create(void) {
+    lygus_notify_t *notify = malloc(sizeof(lygus_notify_t));
+    if (!notify) return NULL;
+
+#ifdef __linux__
+    notify->efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (notify->efd < 0) {
+        free(notify);
+        return NULL;
+    }
+#else
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        free(notify);
+        return NULL;
+    }
+
+    // Set non-blocking on both ends
+    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+    fcntl(pipefd[1], F_SETFL, O_NONBLOCK);
+    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+
+    notify->read_fd = pipefd[0];
+    notify->write_fd = pipefd[1];
+#endif
+
+    return notify;
+}
+
+void lygus_notify_destroy(lygus_notify_t *notify) {
+    if (!notify) return;
+
+#ifdef __linux__
+    if (notify->efd >= 0) close(notify->efd);
+#else
+    if (notify->read_fd >= 0) close(notify->read_fd);
+    if (notify->write_fd >= 0) close(notify->write_fd);
+#endif
+
+    free(notify);
+}
+
+lygus_fd_t lygus_notify_fd(const lygus_notify_t *notify) {
+    if (!notify) return LYGUS_INVALID_FD;
+
+#ifdef __linux__
+    return notify->efd;
+#else
+    return notify->read_fd;
+#endif
+}
+
+int lygus_notify_signal(lygus_notify_t *notify) {
+    if (!notify) return -1;
+
+#ifdef __linux__
+    uint64_t val = 1;
+    // write() to eventfd is async-signal-safe
+    if (write(notify->efd, &val, sizeof(val)) < 0) {
+        if (errno == EAGAIN) return 0;  // Already signaled, that's fine
+        return -1;
+    }
+#else
+    char c = 1;
+    if (write(notify->write_fd, &c, 1) < 0) {
+        if (errno == EAGAIN) return 0;  // Pipe full, already signaled
+        return -1;
+    }
+#endif
+
+    return 0;
+}
+
+int lygus_notify_clear(lygus_notify_t *notify) {
+    if (!notify) return -1;
+
+#ifdef __linux__
+    uint64_t val;
+    while (read(notify->efd, &val, sizeof(val)) > 0) {
+        // Drain all pending signals
+    }
+#else
+    char buf[64];
+    while (read(notify->read_fd, buf, sizeof(buf)) > 0) {
+        // Drain pipe
+    }
+#endif
+
+    return 0;
+}
+
+// ============================================================================
 // Time Utilities
 // ============================================================================
 
