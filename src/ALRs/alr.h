@@ -2,7 +2,7 @@
 * alr.h - Almost-Local Reads (Lazy-ALR) implementation
  *
  * Based on:
- * "Linearizable Latency-Optimized Almost-Local Reads and Timely Writes for Raft"
+ * "The LAW Behind ALRs: Redefining Crash-Tolerant Read"
  * (Giortamis et al., VLDB 2025)
  */
 
