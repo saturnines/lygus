@@ -1,11 +1,9 @@
 /**
-* alr.h - Almost-Local Reads (Lazy-ALR) implementation
- *
- * Based on:
- * "The LAW Behind ALRs: Redefining Crash-Tolerant Read"
- * (Katsarakis et al., VLDB 2025)
+* alr.h - Almost-Local Reads (Lazy-ALR for Raft)
+ * Lazy-ALR for State Machine Replication:
+ * Based on: "The LAW Theorem: Local Reads and Linearizable
+ * Asynchronous Replication" (Katsarakis et al., VLDB 2025)
  */
-
 #ifndef LYGUS_ALR_H
 #define LYGUS_ALR_H
 
