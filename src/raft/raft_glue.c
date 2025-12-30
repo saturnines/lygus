@@ -43,6 +43,7 @@ int glue_ctx_init(raft_glue_ctx_t *ctx, const char *data_dir,
 
     // Replay WAL entries to KV store ( need to check how safe this is)
     uint64_t logged = storage_mgr_logged_index(ctx->storage);
+    uint64_t applied = storage_mgr_applied_index(ctx->storage);
     if (logged > 0) {
         ret = storage_mgr_replay_to(ctx->storage, logged);
         if (ret != LYGUS_OK) {
