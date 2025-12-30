@@ -21,7 +21,10 @@
 #include <sys/types.h>
 #include <sys/file.h>
 #include <sys/wait.h>
-#include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 
 #ifdef __linux__
 #include <sys/syscall.h>
@@ -145,14 +148,10 @@ int64_t lygus_file_size(lygus_fd_t fd) {
     return (int64_t)st.st_size;
 }
 
-/**
- * Force a visibility barrier for file metadata on POSIX.
- */
 int lygus_file_barrier(lygus_fd_t fd) {
     if (fd < 0) return -1;
 
     struct stat st;
-    // forces the kernel to refresh the internal i_size attribute.
     if (fstat(fd, &st) < 0) {
         return -1;
     }
@@ -441,15 +440,14 @@ int lygus_notify_signal(lygus_notify_t *notify) {
 
 #ifdef __linux__
     uint64_t val = 1;
-    // write() to eventfd is async-signal-safe
     if (write(notify->efd, &val, sizeof(val)) < 0) {
-        if (errno == EAGAIN) return 0;  // Already signaled, that's fine
+        if (errno == EAGAIN) return 0;
         return -1;
     }
 #else
     char c = 1;
     if (write(notify->write_fd, &c, 1) < 0) {
-        if (errno == EAGAIN) return 0;  // Pipe full, already signaled
+        if (errno == EAGAIN) return 0;
         return -1;
     }
 #endif
@@ -495,4 +493,127 @@ uint64_t lygus_realtime_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+// ============================================================================
+// Socket Abstraction (POSIX)
+// ============================================================================
+
+int lygus_socket_init(void) {
+    // No-op on POSIX
+    return 0;
+}
+
+void lygus_socket_cleanup(void) {
+    // No-op on POSIX
+}
+
+lygus_socket_t lygus_socket_tcp(void) {
+    return socket(AF_INET, SOCK_STREAM, 0);
+}
+
+int lygus_socket_close(lygus_socket_t sock) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+    return close(sock);
+}
+
+int lygus_socket_set_nonblocking(lygus_socket_t sock) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0) return -1;
+
+    return fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+}
+
+int lygus_socket_set_reuseaddr(lygus_socket_t sock) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+
+    int opt = 1;
+    return setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+}
+
+int lygus_socket_set_nodelay(lygus_socket_t sock) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+
+    int opt = 1;
+    return setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+}
+
+int lygus_socket_bind(lygus_socket_t sock, const char *addr, uint16_t port) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+
+    if (addr && addr[0] != '\0') {
+        if (inet_pton(AF_INET, addr, &sa.sin_addr) <= 0) {
+            return -1;
+        }
+    } else {
+        sa.sin_addr.s_addr = INADDR_ANY;
+    }
+
+    return bind(sock, (struct sockaddr *)&sa, sizeof(sa));
+}
+
+int lygus_socket_listen(lygus_socket_t sock, int backlog) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+    return listen(sock, backlog);
+}
+
+lygus_socket_t lygus_socket_accept(lygus_socket_t sock, char *addr_out, size_t addr_len) {
+    if (sock == LYGUS_INVALID_SOCKET) return LYGUS_INVALID_SOCKET;
+
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    lygus_socket_t client = accept(sock, (struct sockaddr *)&client_addr, &client_len);
+    if (client == LYGUS_INVALID_SOCKET) {
+        return LYGUS_INVALID_SOCKET;
+    }
+
+    if (addr_out && addr_len > 0) {
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
+        snprintf(addr_out, addr_len, "%s:%d", ip, ntohs(client_addr.sin_port));
+    }
+
+    return client;
+}
+
+int64_t lygus_socket_recv(lygus_socket_t sock, void *buf, size_t len) {
+    if (sock == LYGUS_INVALID_SOCKET || !buf) return -1;
+
+    ssize_t n = recv(sock, buf, len, 0);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return -2;  // Would block
+        }
+        return -1;
+    }
+    return (int64_t)n;
+}
+
+int64_t lygus_socket_send(lygus_socket_t sock, const void *buf, size_t len) {
+    if (sock == LYGUS_INVALID_SOCKET || !buf) return -1;
+
+    ssize_t n = send(sock, buf, len, MSG_NOSIGNAL);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return -2;  // Would block
+        }
+        return -1;
+    }
+    return (int64_t)n;
+}
+
+int lygus_socket_would_block(void) {
+    return (errno == EAGAIN || errno == EWOULDBLOCK);
+}
+
+lygus_fd_t lygus_socket_to_fd(lygus_socket_t sock) {
+    return (lygus_fd_t)sock;
 }
