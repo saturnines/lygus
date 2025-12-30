@@ -1037,6 +1037,10 @@ size_t storage_mgr_wal_size(const storage_mgr_t *mgr)
     return mgr ? mgr->wal_bytes_written : 0;
 }
 
+lygus_kv_t *storage_mgr_get_kv(storage_mgr_t *mgr) {
+    return mgr ? mgr->kv : 0; // maybe null is better
+}
+
 // ============================================================================
 // Log Access (for Raft replication)
 // ============================================================================

@@ -29,6 +29,7 @@ extern "C" {
 
 // Forward declarations
 typedef struct storage_mgr storage_mgr_t;
+typedef struct lygus_kv lygus_kv_t;
 
 // ============================================================================
 // Configuration
@@ -291,6 +292,9 @@ size_t storage_mgr_wal_size(const storage_mgr_t *mgr);
  * Replay WAL entries up to target_index
  */
 int storage_mgr_replay_to(storage_mgr_t *mgr, uint64_t target_index);
+
+// This just gets the k-v store lol
+lygus_kv_t *storage_mgr_get_kv(storage_mgr_t *mgr);
 
 // ============================================================================
 // Log Access (for Raft replication)
