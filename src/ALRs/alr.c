@@ -8,7 +8,7 @@
  */
 
 #include "alr.h"
-#include "../raft/raft.h"
+#include "raft.h"
 #include "../state/kv_store.h"
 #include "../util/logging.h"
 
@@ -216,10 +216,10 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
             break;
         }
 
-        // edgecase check, to prevent serving a read that was killed by leader
+        // edgecase check, to prevent serving a read that was killed by leader  ( Note to self, may have included wrong error)
         if (r->sync_term != current_term) {
             alr->respond(r->conn, r->key, r->klen,
-                         NULL, 0, LYGUS_ERR_STALE, alr->respond_ctx);
+                         NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
             alr->head = ring_idx(alr, 1);
             alr->count--;
             alr->stats.reads_stale++;
