@@ -41,6 +41,17 @@ int glue_ctx_init(raft_glue_ctx_t *ctx, const char *data_dir,
         return ret;
     }
 
+    // Replay WAL entries to KV store ( need to check how safe this is)
+    uint64_t logged = storage_mgr_logged_index(ctx->storage);
+    if (logged > 0) {
+        ret = storage_mgr_replay_to(ctx->storage, logged);
+        if (ret != LYGUS_OK) {
+            storage_mgr_close(ctx->storage);
+            ctx->storage = NULL;
+            return ret;
+        }
+    }
+
     // Load peers and create network
     peer_info_t peers[16];
     int num_peers = network_load_peers(peers_file, peers, 16);
