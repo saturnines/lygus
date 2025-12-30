@@ -106,7 +106,7 @@ target_link_libraries(lygus PUBLIC
         stdc++
 )
 
-# Platform-specific libraries
+
 if(UNIX AND NOT APPLE)
     target_link_libraries(lygus PUBLIC rt)
 endif()
