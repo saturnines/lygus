@@ -21,6 +21,15 @@ extern "C" {
 typedef int lygus_fd_t;
 #define LYGUS_INVALID_FD (-1)
 
+/** Socket type - int on POSIX, but needs to handle SOCKET on Windows */
+#ifdef _WIN32
+    typedef uintptr_t lygus_socket_t;
+    #define LYGUS_INVALID_SOCKET (~(lygus_socket_t)0)
+#else
+    typedef int lygus_socket_t;
+    #define LYGUS_INVALID_SOCKET (-1)
+#endif
+
 /** Directory handle (opaque) */
 typedef struct lygus_dir lygus_dir_t;
 
@@ -212,9 +221,10 @@ int lygus_rename(const char *old_path, const char *new_path);
  */
 int lygus_path_exists(const char *path);
 
-    /**
+/**
  * Force a visibility barrier for file metadata.
- * * Ensures that the kernel refreshes its view of the file size and
+ *
+ * Ensures that the kernel refreshes its view of the file size and
  * metadata. Call this if a read fails on a file that is currently
  * being grown by another handle.
  *
@@ -392,7 +402,6 @@ int lygus_notify_signal(lygus_notify_t *notify);
  */
 int lygus_notify_clear(lygus_notify_t *notify);
 
-
 // ============================================================================
 // Time Utilities
 // ============================================================================
@@ -413,6 +422,125 @@ uint64_t lygus_realtime_ns(void);
  * @return  1 if last error was disk full, 0 otherwise
  */
 int lygus_errno_is_disk_full(void);
+
+// ============================================================================
+// Socket Abstraction Layer
+// ============================================================================
+
+/**
+ * Initialize socket subsystem (required on Windows, no-op on POSIX)
+ *
+ * @return  0 on success, -1 on error
+ */
+int lygus_socket_init(void);
+
+/**
+ * Cleanup socket subsystem (required on Windows, no-op on POSIX)
+ */
+void lygus_socket_cleanup(void);
+
+/**
+ * Create a TCP socket
+ *
+ * @return  Socket handle, or LYGUS_INVALID_SOCKET on error
+ */
+lygus_socket_t lygus_socket_tcp(void);
+
+/**
+ * Close a socket
+ *
+ * @param sock  Socket handle
+ * @return      0 on success, -1 on error
+ */
+int lygus_socket_close(lygus_socket_t sock);
+
+/**
+ * Set socket to non-blocking mode
+ *
+ * @param sock  Socket handle
+ * @return      0 on success, -1 on error
+ */
+int lygus_socket_set_nonblocking(lygus_socket_t sock);
+
+/**
+ * Enable SO_REUSEADDR on socket
+ *
+ * @param sock  Socket handle
+ * @return      0 on success, -1 on error
+ */
+int lygus_socket_set_reuseaddr(lygus_socket_t sock);
+
+/**
+ * Enable TCP_NODELAY (disable Nagle's algorithm)
+ *
+ * @param sock  Socket handle
+ * @return      0 on success, -1 on error
+ */
+int lygus_socket_set_nodelay(lygus_socket_t sock);
+
+/**
+ * Bind socket to address and port
+ *
+ * @param sock  Socket handle
+ * @param addr  Address string (NULL or "" for INADDR_ANY)
+ * @param port  Port number
+ * @return      0 on success, -1 on error
+ */
+int lygus_socket_bind(lygus_socket_t sock, const char *addr, uint16_t port);
+
+/**
+ * Start listening for connections
+ *
+ * @param sock     Socket handle
+ * @param backlog  Connection backlog
+ * @return         0 on success, -1 on error
+ */
+int lygus_socket_listen(lygus_socket_t sock, int backlog);
+
+/**
+ * Accept incoming connection
+ *
+ * @param sock      Listening socket
+ * @param addr_out  Output buffer for remote address string (can be NULL)
+ * @param addr_len  Size of addr_out buffer
+ * @return          New socket for connection, or LYGUS_INVALID_SOCKET on error/would-block
+ */
+lygus_socket_t lygus_socket_accept(lygus_socket_t sock, char *addr_out, size_t addr_len);
+
+/**
+ * Receive data from socket
+ *
+ * @param sock  Socket handle
+ * @param buf   Buffer to receive into
+ * @param len   Maximum bytes to receive
+ * @return      Bytes received (>0), 0 on disconnect, -1 on error, -2 on would-block
+ */
+int64_t lygus_socket_recv(lygus_socket_t sock, void *buf, size_t len);
+
+/**
+ * Send data on socket
+ *
+ * @param sock  Socket handle
+ * @param buf   Data to send
+ * @param len   Bytes to send
+ * @return      Bytes sent (>=0), -1 on error, -2 on would-block
+ */
+int64_t lygus_socket_send(lygus_socket_t sock, const void *buf, size_t len);
+
+/**
+ * Check if last socket error was "would block" (EAGAIN/EWOULDBLOCK)
+ *
+ * @return  1 if would block, 0 otherwise
+ */
+int lygus_socket_would_block(void);
+
+/**
+ * Get socket as file descriptor for polling
+ *
+ * @param sock  Socket handle
+ * @return      File descriptor suitable for event loop
+ */
+lygus_fd_t lygus_socket_to_fd(lygus_socket_t sock);
 
 #ifdef __cplusplus
 }
