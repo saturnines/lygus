@@ -219,14 +219,13 @@ int wal_rotate(wal_t *w);
 int wal_should_rotate(const wal_t *w);
 
 // ============================================================================
-// Log Truncation (for willemt/raft integration)
+// Log Truncation
 // ============================================================================
 
 /**
  * Truncate log after index (remove newer entries)
  *
  * Used by Raft when leader overwrites conflicting entries on follower.
- * Maps to willemt/raft's log_pop callback.
  *
  * Keeps entries up to and including `index`, removes everything after.
  * Physically truncates the segment file to reclaim space.
@@ -249,8 +248,6 @@ int wal_truncate_after(wal_t *w, uint64_t index);
  * Purge log entries before index (remove older entries)
  *
  * Used after snapshotting to reclaim disk space.
- * Maps to willemt/raft's log_poll callback (called repeatedly).
- *
  * Deletes entire segments that contain only entries < index.
  * Does NOT modify segments that contain entries >= index.
  *
@@ -269,8 +266,6 @@ int wal_purge_before(wal_t *w, uint64_t index);
  *
  * Deletes all segments and resets to empty state.
  * Used when loading a snapshot that replaces the entire log.
- * Maps to willemt/raft's log_clear callback.
- *
  * @param w  WAL handle
  * @return   LYGUS_OK on success, negative error code otherwise
  */
