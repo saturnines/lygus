@@ -22,6 +22,23 @@
 #pragma comment(lib, "ws2_32.lib")
 
 // ============================================================================
+// Winsock Initialization
+// ============================================================================
+
+static int g_winsock_initialized = 0;
+
+static int ensure_winsock_init(void) {
+    if (!g_winsock_initialized) {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+            return -1;
+        }
+        g_winsock_initialized = 1;
+    }
+    return 0;
+}
+
+// ============================================================================
 // Error Helpers
 // ============================================================================
 
@@ -110,7 +127,6 @@ int64_t lygus_file_pread(lygus_fd_t fd, void *buf, size_t len, uint64_t offset) 
     return (int64_t)bytesRead;
 }
 
-
 int64_t lygus_file_pwrite(lygus_fd_t fd, const void *buf, size_t len, uint64_t offset) {
     if (fd < 0 || !buf) return -1;
 
@@ -160,7 +176,6 @@ int lygus_file_barrier(lygus_fd_t fd) {
     }
     return 0;
 }
-
 
 int lygus_file_truncate(lygus_fd_t fd, uint64_t size) {
     if (fd < 0) return -1;
@@ -289,9 +304,8 @@ int lygus_path_exists(const char *path) {
 struct lygus_dir {
     HANDLE          handle;
     WIN32_FIND_DATAA find_data;
-    int             first;       // 1 = haven't returned first entry yet
-    int             done;        // 1 = no more entries
-    char            pattern[512];
+    int             first;
+    int             done;
 };
 
 lygus_dir_t* lygus_dir_open(const char *path) {
@@ -300,10 +314,11 @@ lygus_dir_t* lygus_dir_open(const char *path) {
     lygus_dir_t *dir = malloc(sizeof(lygus_dir_t));
     if (!dir) return NULL;
 
-    // Build search pattern: "path\*"
-    snprintf(dir->pattern, sizeof(dir->pattern), "%s/*", path);
+    // Append \* for FindFirstFile
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof(pattern), "%s\\*", path);
 
-    dir->handle = FindFirstFileA(dir->pattern, &dir->find_data);
+    dir->handle = FindFirstFileA(pattern, &dir->find_data);
     if (dir->handle == INVALID_HANDLE_VALUE) {
         free(dir);
         return NULL;
@@ -363,7 +378,8 @@ const char* lygus_path_separator(void) {
 int lygus_path_join(char *out, size_t out_len, const char *dir, const char *file) {
     if (!out || !dir || !file || out_len == 0) return -1;
 
-    int n = snprintf(out, out_len, "%s/%s", dir, file);  // Just use /
+    // Use / which Windows also accepts
+    int n = snprintf(out, out_len, "%s/%s", dir, file);
     if (n < 0 || (size_t)n >= out_len) {
         return -1;
     }
@@ -431,8 +447,6 @@ uint32_t lygus_thread_id(void) {
 
 void lygus_sleep_us(uint64_t us) {
     // Windows Sleep() takes milliseconds
-    // For sub-millisecond, we'd need QueryPerformanceCounter busy-wait
-    // or multimedia timers, but Sleep is good enough for our use case
     DWORD ms = (DWORD)((us + 999) / 1000);  // Round up
     if (ms == 0) ms = 1;
     Sleep(ms);
@@ -442,19 +456,6 @@ void lygus_sleep_us(uint64_t us) {
 // Event Notification
 // ============================================================================
 
-// Ensure Winsock is initialized
-static int winsock_init(void) {
-    static int initialized = 0;
-    if (!initialized) {
-        WSADATA wsa;
-        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-            return -1;
-        }
-        initialized = 1;
-    }
-    return 0;
-}
-
 struct lygus_notify {
     SOCKET read_sock;
     SOCKET write_sock;
@@ -462,7 +463,7 @@ struct lygus_notify {
 };
 
 lygus_notify_t *lygus_notify_create(void) {
-    if (winsock_init() < 0) {
+    if (ensure_winsock_init() < 0) {
         return NULL;
     }
 
@@ -470,7 +471,6 @@ lygus_notify_t *lygus_notify_create(void) {
     if (!notify) return NULL;
 
     // Create a UDP socket pair using loopback
-
     notify->read_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (notify->read_sock == INVALID_SOCKET) {
         free(notify);
@@ -579,9 +579,7 @@ uint64_t lygus_monotonic_ns(void) {
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
 
-    // Convert to nanoseconds
-    // Be careful of overflow: counter.QuadPart * 1e9 could overflow
-    // Split the calculation: (counter / freq) * 1e9 + (counter % freq) * 1e9 / freq
+    // Convert to nanoseconds carefully to avoid overflow
     uint64_t seconds = counter.QuadPart / freq.QuadPart;
     uint64_t remainder = counter.QuadPart % freq.QuadPart;
 
@@ -594,8 +592,6 @@ uint64_t lygus_realtime_ns(void) {
 
     // FILETIME is 100-nanosecond intervals since 1601-01-01
     // Unix epoch is 1970-01-01
-    // Difference: 116444736000000000 (100-ns intervals)
-
     ULARGE_INTEGER uli;
     uli.LowPart = ft.dwLowDateTime;
     uli.HighPart = ft.dwHighDateTime;
@@ -606,4 +602,134 @@ uint64_t lygus_realtime_ns(void) {
 
     // Convert 100-ns to nanoseconds
     return unix_100ns * 100;
+}
+
+// ============================================================================
+// Socket Abstraction
+// ============================================================================
+// Code smell here will fix layer
+int lygus_socket_init(void) {
+    return ensure_winsock_init();
+}
+
+void lygus_socket_cleanup(void) {
+    if (g_winsock_initialized) {
+        WSACleanup();
+        g_winsock_initialized = 0;
+    }
+}
+
+lygus_socket_t lygus_socket_tcp(void) {
+    if (ensure_winsock_init() < 0) {
+        return LYGUS_INVALID_SOCKET;
+    }
+    return socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+}
+
+int lygus_socket_close(lygus_socket_t sock) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+    return closesocket(sock) == 0 ? 0 : -1;
+}
+
+int lygus_socket_set_nonblocking(lygus_socket_t sock) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+
+    u_long mode = 1;
+    return ioctlsocket(sock, FIONBIO, &mode) == 0 ? 0 : -1;
+}
+
+int lygus_socket_set_reuseaddr(lygus_socket_t sock) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+
+    int opt = 1;
+    return setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+}
+
+int lygus_socket_set_nodelay(lygus_socket_t sock) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+
+    int opt = 1;
+    return setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&opt, sizeof(opt));
+}
+
+int lygus_socket_bind(lygus_socket_t sock, const char *addr, uint16_t port) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+
+    if (addr && addr[0] != '\0') {
+        // Use InetPtonA for Windows
+        if (InetPtonA(AF_INET, addr, &sa.sin_addr) <= 0) {
+            return -1;
+        }
+    } else {
+        sa.sin_addr.s_addr = INADDR_ANY;
+    }
+
+    return bind(sock, (struct sockaddr *)&sa, sizeof(sa)) == 0 ? 0 : -1;
+}
+
+int lygus_socket_listen(lygus_socket_t sock, int backlog) {
+    if (sock == LYGUS_INVALID_SOCKET) return -1;
+    return listen(sock, backlog) == 0 ? 0 : -1;
+}
+
+lygus_socket_t lygus_socket_accept(lygus_socket_t sock, char *addr_out, size_t addr_len) {
+    if (sock == LYGUS_INVALID_SOCKET) return LYGUS_INVALID_SOCKET;
+
+    struct sockaddr_in client_addr;
+    int client_len = sizeof(client_addr);
+
+    SOCKET client = accept(sock, (struct sockaddr *)&client_addr, &client_len);
+    if (client == INVALID_SOCKET) {
+        return LYGUS_INVALID_SOCKET;
+    }
+
+    if (addr_out && addr_len > 0) {
+        char ip[INET_ADDRSTRLEN];
+        InetNtopA(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
+        snprintf(addr_out, addr_len, "%s:%d", ip, ntohs(client_addr.sin_port));
+    }
+
+    return (lygus_socket_t)client;
+}
+
+int64_t lygus_socket_recv(lygus_socket_t sock, void *buf, size_t len) {
+    if (sock == LYGUS_INVALID_SOCKET || !buf) return -1;
+
+    int n = recv(sock, (char *)buf, (int)len, 0);
+    if (n == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            return -2;  // Would block
+        }
+        return -1;
+    }
+    return (int64_t)n;
+}
+
+int64_t lygus_socket_send(lygus_socket_t sock, const void *buf, size_t len) {
+    if (sock == LYGUS_INVALID_SOCKET || !buf) return -1;
+
+    int n = send(sock, (const char *)buf, (int)len, 0);
+    if (n == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            return -2;  // Would block
+        }
+        return -1;
+    }
+    return (int64_t)n;
+}
+
+int lygus_socket_would_block(void) {
+    return (WSAGetLastError() == WSAEWOULDBLOCK);
+}
+
+lygus_fd_t lygus_socket_to_fd(lygus_socket_t sock) {
+    // Return as int for compatibility with event loop code that uses select()
+    return (lygus_fd_t)sock;
 }
