@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(lygus C)
+project(lygus C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -12,6 +12,10 @@ if(MSVC)
     add_compile_options(/W4)
 endif()
 
+# =============================================================================
+# Dependencies
+# =============================================================================
+
 # ZeroMQ build options
 set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WITH_PERF_TOOL OFF CACHE BOOL "" FORCE)
@@ -19,20 +23,27 @@ set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(BUILD_STATIC ON CACHE BOOL "" FORCE)
 set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
 
-# Dependencies
 add_subdirectory(deps/libzmq)
 add_subdirectory(deps/lil-raft)
 
-# Platform sources
+# =============================================================================
+# Platform Sources
+# =============================================================================
+
 if(WIN32)
     set(PLATFORM_SOURCES src/platform/platform_win32.c)
 else()
-    set(PLATFORM_SOURCES src/platform/platform_posix.c
-            cmd/lygus-server/event_loop.h)
+    set(PLATFORM_SOURCES src/platform/platform_posix.c)
 endif()
 
-# Library
+# =============================================================================
+# Lygus Library
+# =============================================================================
+
 add_library(lygus STATIC
+        # Platform abstraction
+        ${PLATFORM_SOURCES}
+
         # Utils
         src/util/crc32c.c
         src/util/varint.c
@@ -52,18 +63,28 @@ add_library(lygus STATIC
         src/storage/snapshot/snapshot.c
         src/storage/storage_mgr.c
 
-        # Raft
+        # Raft glue
         src/raft/raft_glue.c
 
         # Network
         src/network/network.c
         src/network/mailbox.c
 
+        # Server
+        src/server/server.c
+        src/server/handler.c
+        src/server/conn.c
+        src/server/protocol.c
+        src/server/pending.c
+
+        # ALR (Asynchronous Linearizable Reads)
+        src/ALRs/alr.c
+
+        # Event loop
+        src/event/event_loop.c
+
         # Public API
         src/public/lygus_errors.c
-
-        # Platform
-        ${PLATFORM_SOURCES}
 )
 
 target_include_directories(lygus PUBLIC
@@ -72,12 +93,17 @@ target_include_directories(lygus PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/deps/libzmq/include
 )
 
+# =============================================================================
+# Linking
+# =============================================================================
+
 find_package(Threads REQUIRED)
 
 target_link_libraries(lygus PUBLIC
         Threads::Threads
         raft
         libzmq-static
+        stdc++
 )
 
 # Platform-specific libraries
@@ -92,13 +118,24 @@ endif()
 # Server Binary
 # =============================================================================
 
-add_executable(lygus-server cmd/lygus-server/main.c
-        cmd/lygus-server/event_loop.c
-        cmd/lygus-server/tcp_server.h
-        cmd/lygus-server/tcp_server.c)
-target_link_libraries(lygus-server lygus)
+add_executable(lygus-server
+        cmd/lygus-server/main.c
+)
 
-# Install targets
+target_include_directories(lygus-server PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmd/lygus-server
+)
+
+target_link_libraries(lygus-server PRIVATE lygus stdc++)
+
+# =============================================================================
+# Install
+# =============================================================================
+
 install(TARGETS lygus-server RUNTIME DESTINATION bin)
 install(TARGETS lygus ARCHIVE DESTINATION lib)
-install(FILES src/public/lygus.h src/public/lygus_errors.h DESTINATION include/lygus)
+install(FILES
+        src/public/lygus.h
+        src/public/lygus_errors.h
+        DESTINATION include/lygus
+)
