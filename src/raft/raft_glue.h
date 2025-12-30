@@ -40,7 +40,7 @@ extern "C" {
 // Context
 // ============================================================================
 
-typedef struct {
+typedef struct raft_glue_ctx {
     storage_mgr_t *storage;
     network_t     *network;
     char           data_dir[256];
