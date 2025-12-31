@@ -297,6 +297,12 @@ int main(int argc, char **argv) {
         ret = 1; goto cleanup_glue;
     }
 
+    // --- RESTORE LOG FROM WAL ---
+    if (glue_restore_raft_log(&g_app.glue_ctx, g_app.raft) != 0) {
+        fprintf(stderr, "Failed to restore Raft log\n");
+        ret = 1; goto cleanup_raft;
+    }
+
     // --- Start network ---
     if (glue_ctx_start_network(&g_app.glue_ctx) != 0) {
         fprintf(stderr, "Failed to start network\n");
