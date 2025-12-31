@@ -387,7 +387,7 @@ uint64_t glue_log_last_term(void *ctx) {
 }
 
 
-// This is sucide will need to refactor.
+// This is suicide will need to refactor.
 int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
     if (!ctx || !ctx->storage || !raft) return LYGUS_ERR_INVALID_ARG;
 
@@ -396,12 +396,19 @@ int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
 
     if (last == 0) return LYGUS_OK;  // Empty log, nothing to restore
 
+    // Tell the amnesiac log where it left off
+    raft->log.base_index = first - 1;
+
     uint8_t buf[65536];
 
     for (uint64_t i = first; i <= last; i++) {
         uint64_t term;
         ssize_t len = storage_mgr_log_get(ctx->storage, i, &term, buf, sizeof(buf));
-        if (len < 0) continue;  // Skip errors
+
+        // Fail hard on gaps,a missing entry means corrupted storage
+        if (len < 0) {
+            return LYGUS_ERR_CORRUPT;
+        }
 
         // Determine entry type from data
         raft_entry_type_t type = RAFT_ENTRY_DATA;
@@ -409,21 +416,24 @@ int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
             type = RAFT_ENTRY_NOOP;
         }
 
-        // Append directly to Raft's in-memory log (bypassing callbacks)
         raft_entry_t entry = {
             .index = i,
             .term = term,
             .type = type,
             .data = (len > 0 && type != RAFT_ENTRY_NOOP) ? buf : NULL,
-            .len = (type != RAFT_ENTRY_NOOP) ? len : 0,
+            .len = (type != RAFT_ENTRY_NOOP) ? (size_t)len : 0,
         };
         raft_log_append_entry(&raft->log, &entry);
     }
 
-    // Set commit_index and last_applied to match what was applied
     uint64_t applied = storage_mgr_applied_index(ctx->storage);
     raft->commit_index = applied;
     raft->last_applied = applied;
+
+
+    if (raft_log_last_index(&raft->log) != last) {
+        return LYGUS_ERR_CORRUPT;
+    }
 
     return LYGUS_OK;
 }
