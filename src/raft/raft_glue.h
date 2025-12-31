@@ -142,6 +142,7 @@ int glue_log_truncate_after(void *ctx, uint64_t index);
 uint64_t glue_log_first_index(void *ctx);
 uint64_t glue_log_last_index(void *ctx);
 uint64_t glue_log_last_term(void *ctx);
+int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft);
 
 // State machine
 int glue_apply_entry(void *ctx, uint64_t index, uint64_t term,

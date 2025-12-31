@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <raft.c>
 
 // STATIC SCRATCH BUFFER: Avoids malloc/free on every heartbeat.
 // 128KB is enough for a large batch of entries.
@@ -383,6 +384,48 @@ uint64_t glue_log_last_term(void *ctx) {
     }
 
     return storage_mgr_logged_term(g->storage);
+}
+
+
+// This is sucide will need to refactor.
+int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
+    if (!ctx || !ctx->storage || !raft) return LYGUS_ERR_INVALID_ARG;
+
+    uint64_t first = storage_mgr_first_index(ctx->storage);
+    uint64_t last = storage_mgr_logged_index(ctx->storage);
+
+    if (last == 0) return LYGUS_OK;  // Empty log, nothing to restore
+
+    uint8_t buf[65536];
+
+    for (uint64_t i = first; i <= last; i++) {
+        uint64_t term;
+        ssize_t len = storage_mgr_log_get(ctx->storage, i, &term, buf, sizeof(buf));
+        if (len < 0) continue;  // Skip errors
+
+        // Determine entry type from data
+        raft_entry_type_t type = RAFT_ENTRY_DATA;
+        if (len == 0 || (len >= 1 && buf[0] == GLUE_ENTRY_NOOP)) {
+            type = RAFT_ENTRY_NOOP;
+        }
+
+        // Append directly to Raft's in-memory log (bypassing callbacks)
+        raft_entry_t entry = {
+            .index = i,
+            .term = term,
+            .type = type,
+            .data = (len > 0 && type != RAFT_ENTRY_NOOP) ? buf : NULL,
+            .len = (type != RAFT_ENTRY_NOOP) ? len : 0,
+        };
+        raft_log_append_entry(&raft->log, &entry);
+    }
+
+    // Set commit_index and last_applied to match what was applied
+    uint64_t applied = storage_mgr_applied_index(ctx->storage);
+    raft->commit_index = applied;
+    raft->last_applied = applied;
+
+    return LYGUS_OK;
 }
 
 // ============================================================================
