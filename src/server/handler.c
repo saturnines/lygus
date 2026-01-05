@@ -154,6 +154,7 @@ static void on_pending_complete(const pending_entry_t *entry, int err, void *ctx
     conn_t *conn = (conn_t *)entry->conn;
 
     if (!conn) return;
+    if (conn_get_state(conn) == CONN_STATE_CLOSED) return;
 
     int n;
     if (err == 0) {

@@ -319,11 +319,12 @@ void conn_close_now(conn_t *c) {
     void *ctx = c->ctx;
 
     c->state = CONN_STATE_CLOSED;
-    conn_destroy(c);
 
     if (on_close) {
         on_close(c, ctx);
     }
+
+    conn_destroy(c);
 }
 
 // ============================================================================
