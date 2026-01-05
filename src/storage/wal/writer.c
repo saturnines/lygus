@@ -398,8 +398,7 @@ int wal_writer_append(wal_writer_t *w,
         }
     }
 
-    // CRITICAL: For Paxos I2 invariant, we MUST fsync before returning
-    // Can optimize with batching at the raft layer
+    // Can optimize with batching at the raft layer (This Fsync before returning but this should be moved.
     int ret = wal_writer_flush(w, 1);  // Force flush + sync
     if (ret < 0) {
         return ret;
