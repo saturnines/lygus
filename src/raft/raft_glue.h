@@ -44,6 +44,11 @@ typedef struct raft_glue_ctx {
     storage_mgr_t *storage;
     network_t     *network;
     char           data_dir[256];
+
+    // Snapshot receive buffer (for InstallSnapshot chunks)
+    uint8_t       *snapshot_recv_buf;
+    size_t         snapshot_recv_len;
+    size_t         snapshot_recv_cap;
 } raft_glue_ctx_t;
 
 // ============================================================================
@@ -149,6 +154,43 @@ int glue_apply_entry(void *ctx, uint64_t index, uint64_t term,
                      raft_entry_type_t type, const void *data, size_t len);
 
 // ============================================================================
+// Snapshot Callbacks (for raft_callbacks_t)
+// ============================================================================
+
+/**
+ * Create a snapshot (async - kicks off fork, returns immediately)
+ */
+int glue_snapshot_create(void *ctx, uint64_t index, uint64_t term);
+
+/**
+ * Poll for async snapshot completion
+ * @return 1 if done, 0 if still in progress
+ */
+int glue_snapshot_poll(void *ctx);
+
+/**
+ * Load snapshot metadata on startup
+ */
+int glue_snapshot_load(void *ctx, uint64_t *out_index, uint64_t *out_term);
+
+/**
+ * Read a chunk from snapshot (for sending to followers)
+ */
+int glue_snapshot_read(void *ctx, uint64_t offset, void *buf, size_t buf_len,
+                       size_t *out_len, int *out_done);
+
+/**
+ * Write a chunk of snapshot (received from leader)
+ */
+int glue_snapshot_write(void *ctx, uint64_t offset, const void *data,
+                        size_t len, int done);
+
+/**
+ * Restore state machine from received snapshot
+ */
+int glue_snapshot_restore(void *ctx, uint64_t index, uint64_t term);
+
+// ============================================================================
 // Network Callbacks (used by raft_callbacks_t)
 // ============================================================================
 
@@ -158,6 +200,8 @@ int glue_send_appendentries(void *ctx, int peer_id,
                             const raft_appendentries_req_t *req,
                             const raft_entry_t *entries,
                             size_t n_entries);
+int glue_send_installsnapshot(void *ctx, int peer_id,
+                              const raft_installsnapshot_req_t *req);
 
 // ============================================================================
 // Network Processing (call from main loop)
@@ -218,6 +262,15 @@ static inline raft_callbacks_t glue_make_callbacks(void) {
         // Network
         .send_requestvote   = glue_send_requestvote,
         .send_appendentries = glue_send_appendentries,
+
+        // Snapshots
+        .snapshot_create      = glue_snapshot_create,
+        .snapshot_poll        = glue_snapshot_poll,
+        .snapshot_load        = glue_snapshot_load,
+        .snapshot_read        = glue_snapshot_read,
+        .snapshot_write       = glue_snapshot_write,
+        .snapshot_restore     = glue_snapshot_restore,
+        .send_installsnapshot = glue_send_installsnapshot,
     };
 }
 

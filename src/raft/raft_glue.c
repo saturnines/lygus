@@ -3,6 +3,7 @@
  */
 
 #include "raft_glue.h"
+#include "raft_internal.h"
 #include "network/wire_format.h"
 #include "platform/platform.h"
 #include "public/lygus_errors.h"
@@ -11,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <raft.c>
+
 
 // STATIC SCRATCH BUFFER: Avoids malloc/free on every heartbeat.
 // 128KB is enough for a large batch of entries.
@@ -31,6 +32,11 @@ int glue_ctx_init(raft_glue_ctx_t *ctx, const char *data_dir,
     memset(ctx, 0, sizeof(*ctx));
     snprintf(ctx->data_dir, sizeof(ctx->data_dir), "%s", data_dir);
 
+    // Initialize snapshot receive buffer to NULL
+    ctx->snapshot_recv_buf = NULL;
+    ctx->snapshot_recv_len = 0;
+    ctx->snapshot_recv_cap = 0;
+
     // Configure storage manager
     storage_mgr_config_t cfg;
     storage_mgr_config_init(&cfg);
@@ -42,7 +48,7 @@ int glue_ctx_init(raft_glue_ctx_t *ctx, const char *data_dir,
         return ret;
     }
 
-    // Replay WAL entries to KV store ( need to check how safe this is)
+    // Replay WAL entries to KV store (need to check how safe this is)
     uint64_t logged = storage_mgr_logged_index(ctx->storage);
     uint64_t applied = storage_mgr_applied_index(ctx->storage);
     if (logged > 0) {
@@ -94,6 +100,12 @@ void glue_ctx_destroy(raft_glue_ctx_t *ctx)
         storage_mgr_close(ctx->storage);
         ctx->storage = NULL;
     }
+
+    // Free snapshot receive buffer
+    free(ctx->snapshot_recv_buf);
+    ctx->snapshot_recv_buf = NULL;
+    ctx->snapshot_recv_len = 0;
+    ctx->snapshot_recv_cap = 0;
 }
 
 int glue_ctx_start_network(raft_glue_ctx_t *ctx)
@@ -317,12 +329,11 @@ int glue_log_append(void *ctx, uint64_t index, uint64_t term,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-
     if (data == NULL || len == 0) {
         return storage_mgr_log_noop(g->storage, index, term);
     }
 
-    //  (serialized kv_op)
+    // (serialized kv_op)
     return storage_mgr_log_raw(g->storage, index, term, data, len);
 }
 
@@ -386,7 +397,6 @@ uint64_t glue_log_last_term(void *ctx) {
     return storage_mgr_logged_term(g->storage);
 }
 
-
 // This is suicide will need to refactor.
 int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
     if (!ctx || !ctx->storage || !raft) return LYGUS_ERR_INVALID_ARG;
@@ -394,10 +404,14 @@ int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
     uint64_t first = storage_mgr_first_index(ctx->storage);
     uint64_t last = storage_mgr_logged_index(ctx->storage);
 
+    printf("[RESTORE] first=%lu last=%lu\n", first, last);
+
     if (last == 0) return LYGUS_OK;  // Empty log, nothing to restore
 
     // Tell the amnesiac log where it left off
     raft->log.base_index = first - 1;
+
+    printf("[RESTORE] set base_index=%lu\n", first - 1);
 
     uint8_t buf[65536];
 
@@ -405,7 +419,7 @@ int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
         uint64_t term;
         ssize_t len = storage_mgr_log_get(ctx->storage, i, &term, buf, sizeof(buf));
 
-        // Fail hard on gaps,a missing entry means corrupted storage
+        // Fail hard on gaps, a missing entry means corrupted storage
         if (len < 0) {
             return LYGUS_ERR_CORRUPT;
         }
@@ -430,10 +444,12 @@ int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
     raft->commit_index = applied;
     raft->last_applied = applied;
 
-
     if (raft_log_last_index(&raft->log) != last) {
         return LYGUS_ERR_CORRUPT;
     }
+
+    printf("[RESTORE] done, raft last_index=%lu\n",
+           raft_log_last_index(&raft->log));
 
     return LYGUS_OK;
 }
@@ -481,6 +497,161 @@ int glue_apply_entry(void *ctx, uint64_t index, uint64_t term,
 }
 
 // ============================================================================
+// Snapshot Callbacks
+// ============================================================================
+
+int glue_snapshot_create(void *ctx, uint64_t index, uint64_t term) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->storage) return LYGUS_ERR_INVALID_ARG;
+
+    // Kick off async snapshot, returns immediately after fork
+    return storage_mgr_force_snapshot(g->storage);
+}
+
+int glue_snapshot_poll(void *ctx) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->storage) return 1;  // No storage = "done"
+
+    // Poll for completion and handle cleanup
+    storage_mgr_poll_snapshot(g->storage);
+
+    // Return 1 if done, 0 if still in progress
+    return !storage_mgr_snapshot_in_progress(g->storage);
+}
+
+int glue_snapshot_load(void *ctx, uint64_t *out_index, uint64_t *out_term) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->storage || !out_index || !out_term) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // Query snapshot metadata passing null here for metadata
+    ssize_t ret = storage_mgr_get_snapshot(g->storage, NULL, 0, out_index, out_term);
+
+    if (ret < 0 && *out_index == 0) {
+        return RAFT_ERR_SNAPSHOT_NOT_FOUND;
+    }
+
+    return LYGUS_OK;
+}
+
+int glue_snapshot_read(void *ctx, uint64_t offset, void *buf, size_t buf_len,
+                       size_t *out_len, int *out_done) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->storage || !out_len || !out_done) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // Get total snapshot size first
+    uint64_t snap_index, snap_term;
+    ssize_t total_size = storage_mgr_get_snapshot(g->storage, NULL, 0,
+                                                   &snap_index, &snap_term);
+    if (total_size < 0) {
+        return (int)total_size;
+    }
+
+    // Calculate how much to read
+    if (offset >= (uint64_t)total_size) {
+        *out_len = 0;
+        *out_done = 1;
+        return LYGUS_OK;
+    }
+
+    size_t remaining = (size_t)(total_size - offset);
+    size_t to_read = (remaining < buf_len) ? remaining : buf_len;
+
+    // Read whole snapshot into temp buffer, then copy chunk
+    // (inefficient but works, could optimize with mmap or streaming later)
+    uint8_t *full_snap = malloc(total_size);
+    if (!full_snap) {
+        return LYGUS_ERR_NOMEM;
+    }
+
+    ssize_t got = storage_mgr_get_snapshot(g->storage, full_snap, total_size,
+                                           &snap_index, &snap_term);
+    if (got < 0) {
+        free(full_snap);
+        return (int)got;
+    }
+
+    memcpy(buf, full_snap + offset, to_read);
+    free(full_snap);
+
+    *out_len = to_read;
+    *out_done = (offset + to_read >= (uint64_t)total_size) ? 1 : 0;
+
+    return LYGUS_OK;
+}
+
+int glue_snapshot_write(void *ctx, uint64_t offset, const void *data,
+                        size_t len, int done) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g) return LYGUS_ERR_INVALID_ARG;
+
+    // First chunk, allocate/reset buffer
+    if (offset == 0) {
+        free(g->snapshot_recv_buf);
+        g->snapshot_recv_buf = malloc(len > 0 ? len : 1);
+        if (!g->snapshot_recv_buf) {
+            return LYGUS_ERR_NOMEM;
+        }
+        g->snapshot_recv_len = 0;
+        g->snapshot_recv_cap = len > 0 ? len : 1;
+    }
+
+    // Grow buffer if needed
+    size_t needed = offset + len;
+    if (needed > g->snapshot_recv_cap) {
+        size_t new_cap = g->snapshot_recv_cap * 2;
+        if (new_cap < needed) new_cap = needed;
+
+        uint8_t *new_buf = realloc(g->snapshot_recv_buf, new_cap);
+        if (!new_buf) {
+            return LYGUS_ERR_NOMEM;
+        }
+
+        g->snapshot_recv_buf = new_buf;
+        g->snapshot_recv_cap = new_cap;
+    }
+
+    // Copy chunk
+    if (len > 0) {
+        memcpy(g->snapshot_recv_buf + offset, data, len);
+    }
+    if (offset + len > g->snapshot_recv_len) {
+        g->snapshot_recv_len = offset + len;
+    }
+
+    return LYGUS_OK;
+}
+
+int glue_snapshot_restore(void *ctx, uint64_t index, uint64_t term) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->storage) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // Need to have received snapshot data
+    if (!g->snapshot_recv_buf || g->snapshot_recv_len == 0) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+
+    // Install the accumulated snapshot
+    int ret = storage_mgr_install_snapshot(g->storage,
+                                           g->snapshot_recv_buf,
+                                           g->snapshot_recv_len,
+                                           index, term);
+
+    // Clean up receive buffer
+    free(g->snapshot_recv_buf);
+    g->snapshot_recv_buf = NULL;
+    g->snapshot_recv_len = 0;
+    g->snapshot_recv_cap = 0;
+
+    return ret;
+}
+
+// ============================================================================
 // Network Callbacks
 // ============================================================================
 
@@ -489,7 +660,6 @@ int glue_send_requestvote(void *ctx, int peer_id,
     raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
     if (!g || !g->network || !req) return LYGUS_ERR_INVALID_ARG;
 
-    // Serialize request (already packed struct, can send directly)
     return network_send_raft(g->network, peer_id, MSG_REQUESTVOTE_REQ,
                              req, sizeof(*req));
 }
@@ -512,7 +682,7 @@ int glue_send_appendentries(void *ctx, int peer_id,
         }
     }
 
-    //  STATIC BUFFER to avoid malloc/free thrashing
+    // Use STATIC BUFFER to avoid malloc/free thrashing
     if (total_size > sizeof(scratch_buf)) {
         return LYGUS_ERR_NOMEM;
     }
@@ -549,24 +719,68 @@ int glue_send_appendentries(void *ctx, int peer_id,
         }
     }
 
-    // Send using scratch buffer
     return network_send_raft(g->network, peer_id, MSG_APPENDENTRIES_REQ,
-                                scratch_buf, total_size);
+                             scratch_buf, total_size);
+}
+
+int glue_send_installsnapshot(void *ctx, int peer_id,
+                              const raft_installsnapshot_req_t *req) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->network || !req) return LYGUS_ERR_INVALID_ARG;
+
+    // Serialize: [term:8][leader_id:4][last_index:8][last_term:8][offset:8][len:4][done:4][data]
+    size_t header_size = 8 + 4 + 8 + 8 + 8 + 4 + 4;  // 44 bytes
+    size_t total = header_size + req->len;
+
+    if (total > sizeof(scratch_buf)) {
+        return LYGUS_ERR_NOMEM;
+    }
+
+    uint8_t *p = scratch_buf;
+
+    // term
+    memcpy(p, &req->term, 8);
+    p += 8;
+
+    // leader_id
+    memcpy(p, &req->leader_id, 4);
+    p += 4;
+
+    // last_index
+    memcpy(p, &req->last_index, 8);
+    p += 8;
+
+    // last_term
+    memcpy(p, &req->last_term, 8);
+    p += 8;
+
+    // offset
+    memcpy(p, &req->offset, 8);
+    p += 8;
+
+    // len (as uint32_t for wire format)
+    uint32_t len32 = (uint32_t)req->len;
+    memcpy(p, &len32, 4);
+    p += 4;
+
+    // done
+    memcpy(p, &req->done, 4);
+    p += 4;
+
+    // data
+    if (req->len > 0 && req->data) {
+        memcpy(p, req->data, req->len);
+        p += req->len;
+    }
+
+    return network_send_raft(g->network, peer_id, MSG_INSTALLSNAPSHOT_REQ,
+                             scratch_buf, total);
 }
 
 // ============================================================================
 // Network Receive Helpers (call from main loop)
 // ============================================================================
 
-/**
- * Process incoming Raft messages
- *
- * Call this from your main loop to handle network messages.
- *
- * @param ctx   Glue context
- * @param raft  Raft instance
- * @return Number of messages processed
- */
 int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
 {
     if (!ctx || !ctx->network || !raft) return 0;
@@ -587,7 +801,6 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                     raft_requestvote_resp_t resp;
                     raft_recv_requestvote(raft, req, &resp);
 
-                    // Send response back
                     network_send_raft(ctx->network, from_id, MSG_REQUESTVOTE_RESP,
                                       &resp, sizeof(resp));
                 }
@@ -604,21 +817,17 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
 
             case MSG_APPENDENTRIES_REQ: {
                 if (len >= (int)sizeof(raft_appendentries_req_t) + 4) {
-                    // Parse header
                     raft_appendentries_req_t *req = (raft_appendentries_req_t *)buf;
                     uint8_t *p = buf + sizeof(*req);
 
-                    // Entry count
                     uint32_t n_entries;
                     memcpy(&n_entries, p, 4);
                     p += 4;
 
-                    // Parse entries
                     raft_entry_t *entries = NULL;
                     if (n_entries > 0) {
-                        // SANITY CHECK: Min entry size is 13 bytes (8 term + 1 type + 4 len)
                         if (n_entries > sizeof(buf) / 13) {
-                             break;
+                            break;
                         }
 
                         entries = calloc(n_entries, sizeof(raft_entry_t));
@@ -642,7 +851,6 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
 
                             entries[i].len = data_len;
 
-                            // BOUNDS CHECK 2: Payload
                             if (data_len > 0) {
                                 if (p + data_len > buf + len) {
                                     malformed = 1;
@@ -656,19 +864,16 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                         if (!malformed) {
                             raft_appendentries_resp_t resp;
                             raft_recv_appendentries(raft, req, entries, n_entries, &resp);
-
-                            // Send response back
                             network_send_raft(ctx->network, from_id, MSG_APPENDENTRIES_RESP,
                                               &resp, sizeof(resp));
                         }
 
                         free(entries);
                     } else {
-                        // Heartbeat (0 entries)
                         raft_appendentries_resp_t resp;
                         raft_recv_appendentries(raft, req, NULL, 0, &resp);
                         network_send_raft(ctx->network, from_id, MSG_APPENDENTRIES_RESP,
-                                            &resp, sizeof(resp));
+                                          &resp, sizeof(resp));
                     }
                 }
                 break;
@@ -678,6 +883,58 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                 if (len >= (int)sizeof(raft_appendentries_resp_t)) {
                     raft_appendentries_resp_t *resp = (raft_appendentries_resp_t *)buf;
                     raft_recv_appendentries_response(raft, from_id, resp);
+                }
+                break;
+            }
+
+            case MSG_INSTALLSNAPSHOT_REQ: {
+                // Parse: [term:8][leader_id:4][last_index:8][last_term:8][offset:8][len:4][done:4][data]
+                if (len >= 44) {  // Minimum header size
+                    uint8_t *p = buf;
+
+                    raft_installsnapshot_req_t req;
+
+                    memcpy(&req.term, p, 8);
+                    p += 8;
+
+                    memcpy(&req.leader_id, p, 4);
+                    p += 4;
+
+                    memcpy(&req.last_index, p, 8);
+                    p += 8;
+
+                    memcpy(&req.last_term, p, 8);
+                    p += 8;
+
+                    memcpy(&req.offset, p, 8);
+                    p += 8;
+
+                    uint32_t data_len;
+                    memcpy(&data_len, p, 4);
+                    p += 4;
+                    req.len = data_len;
+
+                    memcpy(&req.done, p, 4);
+                    p += 4;
+
+                    // Validate data length
+                    if ((int)(44 + data_len) <= len) {
+                        req.data = (data_len > 0) ? p : NULL;
+
+                        raft_installsnapshot_resp_t resp;
+                        raft_recv_installsnapshot(raft, &req, &resp);
+
+                        network_send_raft(ctx->network, from_id, MSG_INSTALLSNAPSHOT_RESP,
+                                          &resp, sizeof(resp));
+                    }
+                }
+                break;
+            }
+
+            case MSG_INSTALLSNAPSHOT_RESP: {
+                if (len >= (int)sizeof(raft_installsnapshot_resp_t)) {
+                    raft_installsnapshot_resp_t *resp = (raft_installsnapshot_resp_t *)buf;
+                    raft_recv_installsnapshot_response(raft, from_id, resp);
                 }
                 break;
             }
