@@ -49,6 +49,7 @@ typedef struct {
     const char      *data_dir;
     int              port;
     int              verbose;
+    uint32_t         snapshot_threshold;
 
     // State tracking
     uint64_t         last_tick_ms;
@@ -130,6 +131,7 @@ static void on_tick(event_loop_t *loop, void *data) {
     app_t *app = (app_t *)data;
     uint64_t now_ms = event_loop_now_ms(loop);
     uint32_t elapsed = (uint32_t)(now_ms - app->last_tick_ms);
+    (void)elapsed;
     app->last_tick_ms = now_ms;
 
     // Tick Raft
@@ -198,35 +200,40 @@ static void usage(const char *prog) {
         "lygus-server v%s\n\n"
         "Usage: %s [OPTIONS]\n\n"
         "Options:\n"
-        "  -n, --node-id=ID     Node ID (required)\n"
-        "  -p, --peers=FILE     Peers file (required)\n"
-        "  -d, --data-dir=PATH  Data directory (required)\n"
-        "  -l, --listen=PORT    Client port (default: 8080)\n"
-        "  -v, --verbose        Verbose logging\n"
-        "  -h, --help           Show help\n",
+        "  -n, --node-id=ID            Node ID (required)\n"
+        "  -p, --peers=FILE            Peers file (required)\n"
+        "  -d, --data-dir=PATH         Data directory (required)\n"
+        "  -l, --listen=PORT           Client port (default: 8080)\n"
+        "  -s, --snapshot-threshold=N  Entries before snapshot (default: 10000)\n"
+        "  -v, --verbose               Verbose logging\n"
+        "  -h, --help                  Show help\n",
         LYGUS_VERSION, prog);
 }
 
 static int parse_args(int argc, char **argv, app_t *app) {
     static struct option opts[] = {
-        {"node-id",  required_argument, 0, 'n'},
-        {"peers",    required_argument, 0, 'p'},
-        {"data-dir", required_argument, 0, 'd'},
-        {"listen",   required_argument, 0, 'l'},
-        {"verbose",  no_argument,       0, 'v'},
-        {"help",     no_argument,       0, 'h'},
+        {"node-id",            required_argument, 0, 'n'},
+        {"peers",              required_argument, 0, 'p'},
+        {"data-dir",           required_argument, 0, 'd'},
+        {"listen",             required_argument, 0, 'l'},
+        {"snapshot-threshold", required_argument, 0, 's'},
+        {"verbose",            no_argument,       0, 'v'},
+        {"help",               no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
+    // Defaults
     app->port = 8080;
+    app->snapshot_threshold = 10000;
 
     int c;
-    while ((c = getopt_long(argc, argv, "n:p:d:l:vh", opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "n:p:d:l:s:vh", opts, NULL)) != -1) {
         switch (c) {
             case 'n': app->node_id = atoi(optarg); break;
             case 'p': app->peers_file = optarg; break;
             case 'd': app->data_dir = optarg; break;
             case 'l': app->port = atoi(optarg); break;
+            case 's': app->snapshot_threshold = (uint32_t)atoi(optarg); break;
             case 'v': app->verbose = 1; break;
             case 'h': usage(argv[0]); exit(0);
             default: return -1;
@@ -290,12 +297,20 @@ int main(int argc, char **argv) {
     }
 
     // --- Create Raft ---
+    raft_config_t raft_cfg = RAFT_CONFIG_DEFAULT;
+    raft_cfg.flags |= RAFT_FLAG_AUTO_SNAPSHOT;
+    raft_cfg.snapshot_threshold = g_app.snapshot_threshold;
+
     raft_callbacks_t callbacks = make_callbacks();
-    g_app.raft = raft_create(g_app.node_id, num_peers, &callbacks, &g_app.glue_ctx);
+    g_app.raft = raft_create(g_app.node_id, num_peers, &raft_cfg, &callbacks, &g_app.glue_ctx);
     if (!g_app.raft) {
         fprintf(stderr, "Failed to create Raft\n");
         ret = 1; goto cleanup_glue;
     }
+
+    printf("[Config] snapshot_threshold=%u, auto_snapshot=%s\n",
+           g_app.snapshot_threshold,
+           (raft_cfg.flags & RAFT_FLAG_AUTO_SNAPSHOT) ? "on" : "off");
 
     // --- RESTORE LOG FROM WAL ---
     if (glue_restore_raft_log(&g_app.glue_ctx, g_app.raft) != 0) {
@@ -316,7 +331,7 @@ int main(int argc, char **argv) {
         .raft     = g_app.raft,
         .glue_ctx = &g_app.glue_ctx,
         .storage  = g_app.glue_ctx.storage,
-        .kv = storage_mgr_get_kv(g_app.glue_ctx.storage),
+        .kv       = storage_mgr_get_kv(g_app.glue_ctx.storage),
         .port     = g_app.port,
         .version  = LYGUS_VERSION,
     };
