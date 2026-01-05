@@ -1,4 +1,4 @@
-# lygus
+# lygus 
 
 Distributed KV store with Raft consensus and linearizable reads.
 
@@ -42,3 +42,8 @@ echo "GET $(echo -n 'mykey' | base64)" | nc localhost 8080
 ```bash
 docker-compose up
 ```
+
+
+## license
+
+MIT 
