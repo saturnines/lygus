@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.15)
 project(lygus C CXX)
 
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+
+if(ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -11,6 +18,8 @@ endif()
 if(MSVC)
     add_compile_options(/W4)
 endif()
+
+
 
 # =============================================================================
 # Dependencies
@@ -33,7 +42,8 @@ add_subdirectory(deps/lil-raft)
 if(WIN32)
     set(PLATFORM_SOURCES src/platform/platform_win32.c)
 else()
-    set(PLATFORM_SOURCES src/platform/platform_posix.c)
+    set(PLATFORM_SOURCES src/platform/platform_posix.c
+            bench/spoiler_check.c)
 endif()
 
 # =============================================================================
