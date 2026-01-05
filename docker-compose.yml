@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  node0:
+    build: .
+    container_name: lygus-node0
+    hostname: node0
+    command: ["-n", "0", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "50", "-v"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - node0-data:/data
+      - ./peers.txt:/data/peers.txt:ro
+    networks:
+      lygus-net:
+        ipv4_address: 172.20.0.10
+
+  node1:
+    build: .
+    container_name: lygus-node1
+    hostname: node1
+    command: ["-n", "1", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "50", "-v"]
+    ports:
+      - "8081:8080"
+    volumes:
+      - node1-data:/data
+      - ./peers.txt:/data/peers.txt:ro
+    networks:
+      lygus-net:
+        ipv4_address: 172.20.0.11
+
+  node2:
+    build: .
+    container_name: lygus-node2
+    hostname: node2
+    command: ["-n", "2", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "50", "-v"]
+    ports:
+      - "8082:8080"
+    volumes:
+      - node2-data:/data
+      - ./peers.txt:/data/peers.txt:ro
+    networks:
+      lygus-net:
+        ipv4_address: 172.20.0.12
+
+volumes:
+  node0-data:
+  node1-data:
+  node2-data:
+
+networks:
+  lygus-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
