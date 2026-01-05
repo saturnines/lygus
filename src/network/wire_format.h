@@ -13,20 +13,22 @@ extern "C" {
 // Message Types
 // ============================================================================
 
-typedef enum {
-    // Raft RPCs
-    MSG_REQUESTVOTE_REQ     = 1,
-    MSG_REQUESTVOTE_RESP    = 2,
-    MSG_APPENDENTRIES_REQ   = 3,
-    MSG_APPENDENTRIES_RESP  = 4,
+    typedef enum {
+        // Raft RPCs
+        MSG_REQUESTVOTE_REQ     = 1,
+        MSG_REQUESTVOTE_RESP    = 2,
+        MSG_APPENDENTRIES_REQ   = 3,
+        MSG_APPENDENTRIES_RESP  = 4,
+        MSG_INSTALLSNAPSHOT_REQ  = 5,   // ADD
+        MSG_INSTALLSNAPSHOT_RESP = 6,   // ADD
 
-    // Hermes Maybe.
-    MSG_INV                 = 10,   // Invalidation broadcast
 
-    // Control
-    MSG_PING                = 20,
-    MSG_PONG                = 21,
-} msg_type_t;
+        MSG_INV                 = 10,   // Invalidation broadcast
+
+        // Control
+        MSG_PING                = 20,
+        MSG_PONG                = 21,
+    } msg_type_t;
 
 // ============================================================================
 // Wire Header
