@@ -2,6 +2,8 @@
 
 Distributed KV store with Raft consensus and with linearizable reads.
 
+
+THIS IS CURRENTLY UNDER TESTING HENCE THE KINDA
 ## Quick Start
 ```bash
 docker compose up --build
