@@ -42,8 +42,7 @@ add_subdirectory(deps/lil-raft)
 if(WIN32)
     set(PLATFORM_SOURCES src/platform/platform_win32.c)
 else()
-    set(PLATFORM_SOURCES src/platform/platform_posix.c
-            bench/spoiler_check.c)
+    set(PLATFORM_SOURCES src/platform/platform_posix.c)
 endif()
 
 # =============================================================================
@@ -64,7 +63,6 @@ add_library(lygus STATIC
         src/state/kv_op.c
 
         # Storage
-        src/storage/compression/zstd_engine.c
         src/storage/wal/block_format.c
         src/storage/wal/writer.c
         src/storage/wal/recovery.c
