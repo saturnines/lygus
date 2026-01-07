@@ -1,6 +1,6 @@
 # lygus
 
-Distributed KV store with Raft consensus and soon linearizable reads.
+Distributed KV store with Raft consensus and with linearizable reads.
 
 ## Quick Start
 ```bash
