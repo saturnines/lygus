@@ -153,17 +153,21 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         uint64_t pending = raft_get_pending_index(alr->raft);
 
         if (pending > 0) {
+            // Leader or follower can piggyback on uncommitted current-term entry
             alr->last_issued_sync = pending;
             alr->stats.piggybacks++;
-        } else {
+        } else if (raft_is_leader(alr->raft)) {
+            // Leader can propose NOOP when nothing to piggyback
             uint64_t sync_index;
             if (raft_propose_noop(alr->raft, &sync_index) != 0) {
                 return LYGUS_ERR_SYNC_FAILED;
             }
             alr->last_issued_sync = sync_index;
             alr->stats.syncs_issued++;
+        } else {
+            return LYGUS_ERR_TRY_LEADER;
         }
-    }
+        }
 
     // Copy key into slab
     void *key_ptr = alr->slab + alr->slab_cursor;

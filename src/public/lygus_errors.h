@@ -87,6 +87,7 @@ typedef enum {
   LYGUS_ERR_SYNC_FAILED   = -71,  // NOOP sync failed
   LYGUS_ERR_NOT_FRESH     = -72,  // Replica not fresh enough
   LYGUS_ERR_BATCH_FULL    = -73,  // Read batch full
+  LYGUS_ERR_TRY_LEADER    = -74,  // Follower has nothing to piggyback, try leader
 
   // ============================================================================
   // Network/Transport errors (80-89)

@@ -55,6 +55,7 @@ const char* lygus_strerror(lygus_err_t err) {
         case LYGUS_ERR_SYNC_FAILED:   return "NOOP sync failed";
         case LYGUS_ERR_NOT_FRESH:     return "Replica not fresh enough";
         case LYGUS_ERR_BATCH_FULL:    return "Read batch full";
+        case LYGUS_ERR_TRY_LEADER: return "no pending sync, try leader";
 
         // Network/Transport errors
         case LYGUS_ERR_NET:           return "Network error";
@@ -92,13 +93,13 @@ int lygus_is_retryable(lygus_err_t err) {
         case LYGUS_ERR_BATCH_FULL:
         case LYGUS_ERR_DISK_FULL:
         case LYGUS_ERR_BUSY:
+        case LYGUS_ERR_TRY_LEADER:
             return 1;
 
         default:
             return 0;
     }
 }
-
 int lygus_is_fatal(lygus_err_t err) {
     switch (err) {
         // Fatal errors that indicate unrecoverable state
