@@ -233,8 +233,21 @@ static void handle_get(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // ALR failed (backpressure or not leader) - respond with error
-    int n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, lygus_strerror(err));
+    // ALR failed! respond with error
+    int n;
+    if (err == LYGUS_ERR_TRY_LEADER) {
+        int leader = raft_get_leader_id(h->raft);
+        if (leader >= 0) {
+            n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
+                                    "no pending sync, try node %d", leader);
+        } else {
+            n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE,
+                                   "no pending sync, leader unknown");
+        }
+    } else {
+        n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, lygus_strerror(err));
+    }
+
     if (n > 0) {
         conn_send(conn, h->resp_buf, (size_t)n);
     }
