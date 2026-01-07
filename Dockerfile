@@ -1,4 +1,4 @@
-# Build stage
+
 FROM ubuntu:24.04 AS builder
 
 RUN apt-get update && apt-get install -y \
@@ -8,13 +8,15 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY . .
+
+
+RUN git clone --recursive https://github.com/saturnines/lygus.git .
 
 RUN mkdir -p build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc)
 
-# Runtime stage
+
 FROM ubuntu:24.04
 
 WORKDIR /app
@@ -25,4 +27,4 @@ RUN mkdir -p /data
 
 EXPOSE 8080 5000 5001
 
-ENTRYPOINT ["stdbuf", "-oL", "-eL", "/app/lygus-server"]
+ENTRYPOINT ["stdbuf", "-oL", "-eL", "/app/lygus-server", "-v"]
