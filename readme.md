@@ -1,55 +1,51 @@
-# lygus 
-Distributed KV store with Raft consensus and linearizable reads.
-(Work in progress, most functionalities are complete just need to iron out details.) 
+# lygus
 
-## Quick Start (Recommended)
+Distributed KV store with Raft consensus and soon linearizable reads.
 
-The easiest way to run lygus is with Docker Compose:
+## Quick Start
 ```bash
-docker-compose up
+docker compose up --build
 ```
 
-This will start a 3-node cluster. Then in another terminal:
+This starts a 3-node cluster:
+- Node 0: localhost:8080
+- Node 1: localhost:8081  
+- Node 2: localhost:8082
+
+## Usage
 ```bash
-# Check status
+# Check status (shows role, leader id, term)
 echo "STATUS" | nc localhost 8080
 
-# Write (base64 encoded key/value)
-echo "PUT $(echo -n 'mykey' | base64) $(echo -n 'myvalue' | base64)" | nc localhost 8080
+# Write to leader
+echo "PUT $(echo -n 'hello' | base64) $(echo -n 'world' | base64)" | nc localhost 8080
 
-# Read
-echo "GET $(echo -n 'mykey' | base64)" | nc localhost 8080
+# Read 
+echo "GET $(echo -n 'hello' | base64)" | nc localhost 8080
 ```
 
-## Building from Source
-
-If you prefer to build manually:
+## Testing Failover
 ```bash
-# Initialize submodules first
-git submodule update --init --recursive
+# Find the leader
+echo "STATUS" | nc localhost 8080  # LEADER or FOLLOWER
 
-# Build
-mkdir build && cd build
-cmake ..
-make
+# Kill a node
+docker stop lygus-node0
+
+# Watch new leader election
+docker logs -f lygus-node1
+
+# Bring it back
+docker start lygus-node0
 ```
 
-### Running locally
+Data survives leader failover as long as quorum (2/3 nodes) is maintained.
+
+## Cleanup
 ```bash
-# Create peers file
-cat > peers.txt << EOF
-0 127.0.0.1 5000 5001
-1 127.0.0.1 5010 5011
-2 127.0.0.1 5020 5021
-EOF
-
-# Start 3 nodes
-./build/lygus-server -n 0 -p peers.txt -d /tmp/node0 -l 8080 &
-./build/lygus-server -n 1 -p peers.txt -d /tmp/node1 -l 8081 &
-./build/lygus-server -n 2 -p peers.txt -d /tmp/node2 -l 8082 &
+docker compose down -v
 ```
-
-**Note:** Native builds may have issues with Raft port binding on some systems. Docker Compose is recommended.
 
 ## License
+
 MIT
