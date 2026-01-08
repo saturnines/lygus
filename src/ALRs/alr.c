@@ -1,12 +1,9 @@
 /**
- * alr.c - Almost Local Reads (FIXED)
+ * alr.c - Almost Local Reads
  *
  * Memory model:
  *   - Ring buffer for metadata (fixed slots)
  *   - Linear slab for keys (bump allocator, reset on drain)
- *
- * FIX: Prevent zombie leader stale reads by checking leadership status
- *      before serving reads, not just term equality.
  */
 
 #include "alr.h"
@@ -225,11 +222,9 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
             break;
         }
 
-        // Verify our sync entry is still in the log at the expected term
         uint64_t term_at_sync = raft_log_term_at(alr->raft, r->sync_index);
 
-        if (term_at_sync != r->sync_term) {
-
+        if (term_at_sync != r->sync_term || term_at_sync == 0) {
             alr->respond(r->conn, r->key, r->klen,
                          NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
             alr->head = ring_idx(alr, 1);
