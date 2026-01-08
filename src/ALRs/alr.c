@@ -1,10 +1,12 @@
 /**
- * alr.c - Almost Local Reads
+ * alr.c - Almost Local Reads (FIXED)
  *
  * Memory model:
  *   - Ring buffer for metadata (fixed slots)
  *   - Linear slab for keys (bump allocator, reset on drain)
  *
+ * FIX: Prevent zombie leader stale reads by checking leadership status
+ *      before serving reads, not just term equality.
  */
 
 #include "alr.h"
@@ -14,6 +16,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 // ============================================================================
 // Defaults
@@ -33,6 +36,7 @@ typedef struct {
     size_t   klen;
     uint64_t sync_index;
     uint64_t sync_term;
+    bool     queued_as_leader;  // FIX: track if we were leader when queued
 } pending_read_t;
 
 struct alr {
@@ -146,6 +150,9 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         }
     }
 
+    // FIX: Check leadership status NOW and record it
+    bool is_leader = raft_is_leader(alr->raft);
+
     // Acquire sync point
     if (alr->last_issued_sync == 0 ||
         alr->last_issued_sync <= alr->last_applied) {
@@ -156,7 +163,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             // Leader or follower can piggyback on uncommitted current-term entry
             alr->last_issued_sync = pending;
             alr->stats.piggybacks++;
-        } else if (raft_is_leader(alr->raft)) {
+        } else if (is_leader) {
             // Leader can propose NOOP when nothing to piggyback
             uint64_t sync_index;
             if (raft_propose_noop(alr->raft, &sync_index) != 0) {
@@ -167,7 +174,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         } else {
             return LYGUS_ERR_TRY_LEADER;
         }
-        }
+    }
 
     // Copy key into slab
     void *key_ptr = alr->slab + alr->slab_cursor;
@@ -186,6 +193,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     r->klen = klen;
     r->sync_index = alr->last_issued_sync;
     r->sync_term = raft_get_term(alr->raft);
+    r->queued_as_leader = is_leader;  // FIX: record leadership status
 
     alr->count++;
     alr->stats.reads_total++;
@@ -204,6 +212,7 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
     uint8_t val_buf[ALR_MAX_VALUE_SIZE];
     uint64_t current_term = raft_get_term(alr->raft);
+    bool currently_leader = raft_is_leader(alr->raft);
 
     while (alr->count > 0) {
         pending_read_t *r = ring_head(alr);
@@ -220,7 +229,8 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
             break;
         }
 
-        // edgecase check, to prevent serving a read that was killed by leader  ( Note to self, may have included wrong error)
+
+        // If term changed, we definitely can't serve this read
         if (r->sync_term != current_term) {
             alr->respond(r->conn, r->key, r->klen,
                          NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
@@ -230,7 +240,28 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
             continue;
         }
 
-        // Read
+
+        // we can't guarantee linearizability. The sync_term might still
+        // match (zombie window), but we've lost leadership.
+        if (r->queued_as_leader && !currently_leader) {
+            alr->respond(r->conn, r->key, r->klen,
+                         NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+            alr->head = ring_idx(alr, 1);
+            alr->count--;
+            alr->stats.reads_stale++;
+            continue;
+        }
+
+        if (!r->queued_as_leader && currently_leader) {
+            alr->respond(r->conn, r->key, r->klen,
+                         NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+            alr->head = ring_idx(alr, 1);
+            alr->count--;
+            alr->stats.reads_stale++;
+            continue;
+        }
+
+        // Safe to read:
         ssize_t vlen = lygus_kv_get(alr->kv, r->key, r->klen,
                                      val_buf, sizeof(val_buf));
 
