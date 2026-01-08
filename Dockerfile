@@ -19,6 +19,8 @@ RUN mkdir -p build && cd build && \
 
 FROM ubuntu:24.04
 
+RUN apt-get update && apt-get install -y iptables && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY --from=builder /build/build/lygus-server /app/lygus-server
