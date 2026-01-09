@@ -1,39 +1,23 @@
 cmake_minimum_required(VERSION 3.15)
 project(lygus C CXX)
 
-option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
-
-if(ENABLE_ASAN)
-    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
-    add_link_options(-fsanitize=address)
-endif()
-
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# Compiler warnings
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra)
 endif()
-if(MSVC)
-    add_compile_options(/W4)
-endif()
-
-
 
 # =============================================================================
 # Dependencies
 # =============================================================================
 
-# ZeroMQ build options
-set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(WITH_PERF_TOOL OFF CACHE BOOL "" FORCE)
+# Build options for dependencies
 set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(BUILD_STATIC ON CACHE BOOL "" FORCE)
-set(ENABLE_DRAFTS OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(deps/libzmq)
-add_subdirectory(deps/lil-raft)
+add_subdirectory(deps/lil-raft) # <--- KEEP THIS
 
 # =============================================================================
 # Platform Sources
@@ -42,7 +26,8 @@ add_subdirectory(deps/lil-raft)
 if(WIN32)
     set(PLATFORM_SOURCES src/platform/platform_win32.c)
 else()
-    set(PLATFORM_SOURCES src/platform/platform_posix.c)
+    set(PLATFORM_SOURCES src/platform/platform_posix.c
+            src/storage/compression/zstd_engine.h)
 endif()
 
 # =============================================================================
@@ -50,7 +35,6 @@ endif()
 # =============================================================================
 
 add_library(lygus STATIC
-        # Platform abstraction
         ${PLATFORM_SOURCES}
 
         # Utils
@@ -85,7 +69,7 @@ add_library(lygus STATIC
         src/server/protocol.c
         src/server/pending.c
 
-        # ALR (Asynchronous Linearizable Reads)
+        # ALR
         src/ALRs/alr.c
 
         # Event loop
@@ -95,18 +79,16 @@ add_library(lygus STATIC
         src/public/lygus_errors.c
 )
 
+# Includes
 target_include_directories(lygus PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/deps/lil-raft/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/lil-raft/src # <--- Point to submodule
         ${CMAKE_CURRENT_SOURCE_DIR}/deps/libzmq/include
 )
 
-# =============================================================================
-# Linking
-# =============================================================================
-
 find_package(Threads REQUIRED)
 
+# Linking
 target_link_libraries(lygus PUBLIC
         Threads::Threads
         raft
@@ -114,36 +96,14 @@ target_link_libraries(lygus PUBLIC
         stdc++
 )
 
-
 if(UNIX AND NOT APPLE)
     target_link_libraries(lygus PUBLIC rt)
 endif()
-if(WIN32)
-    target_link_libraries(lygus PUBLIC ws2_32 iphlpapi)
-endif()
 
 # =============================================================================
-# Server Binary
+# Binary
 # =============================================================================
 
-add_executable(lygus-server
-        cmd/lygus-server/main.c
-)
-
-target_include_directories(lygus-server PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/cmd/lygus-server
-)
-
+add_executable(lygus-server cmd/lygus-server/main.c)
+target_include_directories(lygus-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cmd/lygus-server)
 target_link_libraries(lygus-server PRIVATE lygus stdc++)
-
-# =============================================================================
-# Install
-# =============================================================================
-
-install(TARGETS lygus-server RUNTIME DESTINATION bin)
-install(TARGETS lygus ARCHIVE DESTINATION lib)
-install(FILES
-        src/public/lygus.h
-        src/public/lygus_errors.h
-        DESTINATION include/lygus
-)
