@@ -171,7 +171,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             // Follower with nothing to piggyback. use commit_index
             alr->last_issued_sync = raft_get_commit_index(alr->raft);
             if (alr->last_issued_sync == 0) {
-                return LYGUS_ERR_TRY_LEADER;  /
+                return LYGUS_ERR_TRY_LEADER;
             }
         }
         }
