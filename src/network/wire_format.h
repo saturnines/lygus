@@ -19,8 +19,10 @@ extern "C" {
         MSG_REQUESTVOTE_RESP    = 2,
         MSG_APPENDENTRIES_REQ   = 3,
         MSG_APPENDENTRIES_RESP  = 4,
-        MSG_INSTALLSNAPSHOT_REQ  = 5,   // ADD
-        MSG_INSTALLSNAPSHOT_RESP = 6,   // ADD
+        MSG_INSTALLSNAPSHOT_REQ  = 5,
+        MSG_INSTALLSNAPSHOT_RESP = 6,
+        MSG_READINDEX_REQ        = 7,
+        MSG_READINDEX_RESP       = 8,
 
 
         MSG_INV                 = 10,   // Invalidation broadcast

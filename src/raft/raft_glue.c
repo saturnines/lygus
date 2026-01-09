@@ -938,6 +938,29 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                 }
                 break;
             }
+            case MSG_READINDEX_REQ: {
+                if (len >= (int)sizeof(raft_readindex_req_t)) {
+                    raft_readindex_req_t *req = (raft_readindex_req_t *)buf;
+                    raft_readindex_resp_t resp;
+                    raft_recv_readindex(raft, req, &resp);
+
+                    // Only send immediate response if not queued
+                    // (queued = err==0 && read_index==0, will be sent via callback)
+                    if (resp.err != 0 || resp.read_index != 0) {
+                        network_send_raft(ctx->network, from_id, MSG_READINDEX_RESP,
+                                          &resp, sizeof(resp));
+                    }
+                }
+                break;
+            }
+
+            case MSG_READINDEX_RESP: {
+                if (len >= (int)sizeof(raft_readindex_resp_t)) {
+                    raft_readindex_resp_t *resp = (raft_readindex_resp_t *)buf;
+                    raft_recv_readindex_response(raft, resp);
+                }
+                break;
+            }
         }
 
         processed++;
