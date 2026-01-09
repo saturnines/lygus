@@ -323,6 +323,12 @@ void server_on_log_truncate(server_t *srv, uint64_t from_index) {
     handler_on_log_truncate(srv->handler, from_index);
 }
 
+void server_on_readindex_complete(server_t *srv, uint64_t req_id,
+                                   uint64_t read_index, int err) {
+    if (!srv) return;
+    handler_on_readindex_complete(srv->handler, req_id, read_index, err);
+}
+
 // ============================================================================
 // Stats
 // ============================================================================

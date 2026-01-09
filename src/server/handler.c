@@ -470,6 +470,12 @@ void handler_tick(handler_t *h, uint64_t now_ms) {
     pending_timeout_sweep(h->pending, now_ms);
 }
 
+void handler_on_readindex_complete(handler_t *h, uint64_t req_id,
+                                    uint64_t read_index, int err) {
+    if (!h || !h->alr) return;
+    alr_on_read_index(h->alr, req_id, read_index, err);
+}
+
 // ============================================================================
 // Stats
 // ============================================================================

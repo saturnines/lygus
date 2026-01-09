@@ -183,14 +183,22 @@ static int log_truncate_wrapper(void *ctx, uint64_t index) {
     return ret;
 }
 
+static void on_readindex_complete_wrapper(void *ctx, uint64_t req_id,
+                                           uint64_t read_index, int err) {
+    (void)ctx;
+    if (g_app.server) {
+        server_on_readindex_complete(g_app.server, req_id, read_index, err);
+    }
+}
+
 static raft_callbacks_t make_callbacks(void) {
     raft_callbacks_t cb = glue_make_callbacks();
     // Override to add server notifications
     cb.apply_entry = apply_entry_wrapper;
     cb.log_truncate_after = log_truncate_wrapper;
+    cb.on_readindex_complete = on_readindex_complete_wrapper;
     return cb;
 }
-
 // ============================================================================
 // CLI
 // ============================================================================

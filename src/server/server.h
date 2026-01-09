@@ -141,7 +141,9 @@ void server_on_leadership_change(server_t *srv, bool is_leader);
  * Log truncation - call from log_truncate_after callback
  */
 void server_on_log_truncate(server_t *srv, uint64_t from_index);
-
+    
+void server_on_readindex_complete(server_t *srv, uint64_t req_id,
+                                   uint64_t read_index, int err);
 // ============================================================================
 // Stats
 // ============================================================================
