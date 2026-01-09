@@ -1,15 +1,23 @@
 /**
- * alr.c - Almost Local Reads
+ * alr.c - Almost Local Reads (Lazy-ALR for Raft)
+ *
+ * Implements linearizable reads from any replica using the Lazy-ALR
+ * technique from "The LAW Theorem" paper.
  *
  * Memory model:
  *   - Ring buffer for metadata (fixed slots)
  *   - Linear slab for keys (bump allocator, reset on drain)
+ *
+ * Sync strategies (in priority order):
+ *   1. Piggyback on pending log entry (leader or follower)
+ *   2. Leader: propose NOOP
+ *   3. Follower: async ReadIndex RPC to leader
  */
 
 #include "alr.h"
 #include "raft.h"
-#include "../state/kv_store.h"
-#include "../util/logging.h"
+#include "public/lygus_errors.h"
+#include "state/kv_store.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -27,12 +35,20 @@
 // Internal Types
 // ============================================================================
 
+typedef enum {
+    READ_STATE_READY,           // Has sync_index, waiting for apply
+    READ_STATE_AWAITING_INDEX,  // Waiting for ReadIndex response
+    READ_STATE_CANCELLED,       // Connection died
+} read_state_t;
+
 typedef struct {
-    void    *conn;
-    void    *key;
-    size_t   klen;
-    uint64_t sync_index;
-    uint64_t sync_term;
+    void        *conn;
+    void        *key;
+    size_t       klen;
+    uint64_t     sync_index;
+    uint64_t     sync_term;
+    uint64_t     read_index_id;  // Which ReadIndex request this is waiting on
+    read_state_t state;
 } pending_read_t;
 
 struct alr {
@@ -52,6 +68,11 @@ struct alr {
     uint64_t last_issued_sync;
     uint64_t last_applied;
 
+    // ReadIndex state
+    uint64_t read_index_seq;         // Monotonic ID generator
+    uint64_t pending_read_index_id;
+    uint64_t pending_read_index_term;
+
     // Dependencies
     raft_t         *raft;
     lygus_kv_t     *kv;
@@ -70,12 +91,57 @@ static inline uint16_t ring_idx(alr_t *alr, uint16_t offset) {
     return (alr->head + offset) % alr->capacity;
 }
 
+static inline pending_read_t *ring_at(alr_t *alr, uint16_t offset) {
+    return &alr->reads[ring_idx(alr, offset)];
+}
+
 static inline pending_read_t *ring_head(alr_t *alr) {
     return &alr->reads[alr->head];
 }
 
 static inline pending_read_t *ring_tail(alr_t *alr) {
     return &alr->reads[ring_idx(alr, alr->count)];
+}
+
+// ============================================================================
+// Internal: Fail reads waiting on a specific ReadIndex request
+// ============================================================================
+
+static void fail_reads_for_read_index(alr_t *alr, uint64_t read_index_id, lygus_err_t err) {
+    for (uint16_t i = 0; i < alr->count; i++) {
+        pending_read_t *r = ring_at(alr, i);
+
+        if (r->state == READ_STATE_AWAITING_INDEX &&
+            r->read_index_id == read_index_id) {
+
+            if (r->conn != NULL) {
+                alr->respond(r->conn, r->key, r->klen,
+                             NULL, 0, err, alr->respond_ctx);
+            }
+            r->state = READ_STATE_CANCELLED;
+            r->conn = NULL;
+            alr->stats.reads_failed++;
+        }
+    }
+}
+
+// ============================================================================
+// Internal: Promote reads waiting on ReadIndex to ready state
+// ============================================================================
+
+static void promote_reads_for_read_index(alr_t *alr, uint64_t read_index_id,
+                                          uint64_t sync_index, uint64_t sync_term) {
+    for (uint16_t i = 0; i < alr->count; i++) {
+        pending_read_t *r = ring_at(alr, i);
+
+        if (r->state == READ_STATE_AWAITING_INDEX &&
+            r->read_index_id == read_index_id) {
+
+            r->sync_index = sync_index;
+            r->sync_term = sync_term;
+            r->state = READ_STATE_READY;
+        }
+    }
 }
 
 // ============================================================================
@@ -124,7 +190,7 @@ void alr_destroy(alr_t *alr) {
 }
 
 // ============================================================================
-// Core Operations
+// Core: Queue a read
 // ============================================================================
 
 lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
@@ -137,67 +203,138 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         return LYGUS_ERR_BATCH_FULL;
     }
 
-    // Slab full?
+    // Slab space check
     if (alr->slab_cursor + klen > alr->slab_size) {
         if (alr->count == 0) {
-            alr->slab_cursor = 0;  // safe to reset
+            alr->slab_cursor = 0;
         } else {
-            return LYGUS_ERR_BATCH_FULL;  // can't wrap with pending reads
+            return LYGUS_ERR_BATCH_FULL;
         }
     }
 
-    // FIX: Check leadership status NOW and record it
     bool is_leader = raft_is_leader(alr->raft);
+    uint64_t current_term = raft_get_term(alr->raft);
 
-    // Acquire sync point
-    if (alr->last_issued_sync == 0 ||
-        alr->last_issued_sync <= alr->last_applied) {
+    // Determine sync strategy
+    uint64_t sync_index = 0;
+    uint64_t sync_term = 0;
+    uint64_t read_index_id = 0;
+    read_state_t initial_state = READ_STATE_READY;
 
+    // Can we reuse an existing sync point?
+    if (alr->last_issued_sync > 0 &&
+        alr->last_issued_sync > alr->last_applied) {
+        // Existing sync still pending - batch onto it
+        sync_index = alr->last_issued_sync;
+        sync_term = current_term;
+        alr->stats.batched++;
+    }
+    // Can we piggyback on a pending write?
+    else {
         uint64_t pending = raft_get_pending_index(alr->raft);
 
-        if (pending > 0) {
-            // Leader or follower can piggyback on uncommitted current-term entry
+        if (pending > 0 && pending > alr->last_applied) {
+            sync_index = pending;
+            sync_term = current_term;
             alr->last_issued_sync = pending;
             alr->stats.piggybacks++;
-        } else if (is_leader) {
-            // Leader can propose NOOP when nothing to piggyback
-            uint64_t sync_index;
+        }
+        else if (is_leader) {
+            // Leader proposes NOOP
             if (raft_propose_noop(alr->raft, &sync_index) != 0) {
                 return LYGUS_ERR_SYNC_FAILED;
             }
+            sync_term = raft_get_term(alr->raft);  // May have changed
             alr->last_issued_sync = sync_index;
             alr->stats.syncs_issued++;
-        } else {
-            // Follower with nothing to piggyback. use commit_index
-            alr->last_issued_sync = raft_get_commit_index(alr->raft);
-            if (alr->last_issued_sync == 0) {
-                return LYGUS_ERR_TRY_LEADER;
+        }
+        else {
+            if (alr->pending_read_index_id == 0) {
+                uint64_t req_id = ++alr->read_index_seq;
+                int err = raft_request_read_index_async(alr->raft, req_id);
+                if (err != 0) {
+                    return LYGUS_ERR_TRY_LEADER;
+                }
+                alr->pending_read_index_id = req_id;
+                alr->pending_read_index_term = current_term;
+                alr->stats.read_index_issued++;
             }
-        }
-        }
 
+            read_index_id = alr->pending_read_index_id;
+            initial_state = READ_STATE_AWAITING_INDEX;
+        }
+    }
+
+    // Copy key to slab
     void *key_ptr = alr->slab + alr->slab_cursor;
     memcpy(key_ptr, key, klen);
     alr->slab_cursor += klen;
 
-    // Track high water aka memory
     if (alr->slab_cursor > alr->slab_high_water) {
         alr->slab_high_water = alr->slab_cursor;
     }
 
-    // Queue metadata
+    // Queue the read
     pending_read_t *r = ring_tail(alr);
     r->conn = conn;
     r->key = key_ptr;
     r->klen = klen;
-    r->sync_index = alr->last_issued_sync;
-    r->sync_term = raft_get_term(alr->raft);
+    r->sync_index = sync_index;
+    r->sync_term = sync_term;
+    r->read_index_id = read_index_id;
+    r->state = initial_state;
 
     alr->count++;
     alr->stats.reads_total++;
 
     return LYGUS_OK;
 }
+
+// ============================================================================
+// Core: ReadIndex response callback
+// ============================================================================
+
+void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
+    if (!alr) return;
+
+    // Ignore stale responses
+    if (req_id != alr->pending_read_index_id) {
+        return;
+    }
+
+    alr->pending_read_index_id = 0;
+
+    if (err != 0) {
+        fail_reads_for_read_index(alr, req_id, LYGUS_ERR_TRY_LEADER);
+        return;
+    }
+
+    // Verify term hasn't changed since we sent the request
+    uint64_t current_term = raft_get_term(alr->raft);
+    if (current_term != alr->pending_read_index_term) {
+        // Term changed, unsafe to use this ReadIndex
+        fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
+        return;
+    }
+
+    // Get the term of the entry at the read index
+    uint64_t index_term = raft_log_term_at(alr->raft, index);
+    if (index_term == 0) {
+        fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
+        return;
+    }
+
+    // Promote waiting reads to ready state
+    promote_reads_for_read_index(alr, req_id, index, index_term);
+    alr->last_issued_sync = index;
+
+    // Try to complete any now-ready reads
+    alr_notify(alr, alr->last_applied);
+}
+
+// ============================================================================
+// Core: Notification that entries have been applied
+// ============================================================================
 
 void alr_notify(alr_t *alr, uint64_t applied_index) {
     if (!alr) return;
@@ -213,39 +350,50 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
     while (alr->count > 0) {
         pending_read_t *r = ring_head(alr);
 
-        // Skip cancelled
-        if (r->conn == NULL) {
+        // Skip cancelled reads
+        if (r->state == READ_STATE_CANCELLED) {
             alr->head = ring_idx(alr, 1);
             alr->count--;
             continue;
         }
 
-        // Not ready yet
+        // Still waiting for ReadIndex response
+        if (r->state == READ_STATE_AWAITING_INDEX) {
+            break;
+        }
+
+        // Not applied yet
         if (r->sync_index > alr->last_applied) {
             break;
         }
 
+        // Verify the entry at sync_index hasn't been overwritten (leader change)
         uint64_t term_at_sync = raft_log_term_at(alr->raft, r->sync_index);
 
         if (term_at_sync != r->sync_term || term_at_sync == 0) {
-            alr->respond(r->conn, r->key, r->klen,
-                         NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+            // Log was truncated/overwritten, stale read
+            if (r->conn != NULL) {
+                alr->respond(r->conn, r->key, r->klen,
+                             NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+            }
             alr->head = ring_idx(alr, 1);
             alr->count--;
             alr->stats.reads_stale++;
             continue;
         }
 
-        // Safe to read, our sync committed and is still valid
+        // Safe to read, sync committed and entry unchanged
         ssize_t vlen = lygus_kv_get(alr->kv, r->key, r->klen,
                                      val_buf, sizeof(val_buf));
 
-        if (vlen >= 0) {
-            alr->respond(r->conn, r->key, r->klen,
-                         val_buf, (size_t)vlen, LYGUS_OK, alr->respond_ctx);
-        } else {
-            alr->respond(r->conn, r->key, r->klen,
-                         NULL, 0, (lygus_err_t)vlen, alr->respond_ctx);
+        if (r->conn != NULL) {
+            if (vlen >= 0) {
+                alr->respond(r->conn, r->key, r->klen,
+                             val_buf, (size_t)vlen, LYGUS_OK, alr->respond_ctx);
+            } else {
+                alr->respond(r->conn, r->key, r->klen,
+                             NULL, 0, (lygus_err_t)vlen, alr->respond_ctx);
+            }
         }
 
         alr->head = ring_idx(alr, 1);
@@ -259,17 +407,40 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
     }
 }
 
+// ============================================================================
+// Core: Term change notification
+// ============================================================================
+
+void alr_on_term_change(alr_t *alr, uint64_t new_term) {
+    if (!alr) return;
+
+    // Cancel any pending ReadIndex - it's no longer valid
+    if (alr->pending_read_index_id != 0) {
+        fail_reads_for_read_index(alr, alr->pending_read_index_id,
+                                   LYGUS_ERR_STALE_READ);
+        alr->pending_read_index_id = 0;
+    }
+
+    // Invalidate cached sync point
+    alr->last_issued_sync = 0;
+}
+
+// ============================================================================
+// Core: Cancel reads for a connection
+// ============================================================================
+
 int alr_cancel_conn(alr_t *alr, void *conn) {
     if (!alr || !conn) return 0;
 
     int cancelled = 0;
 
     for (uint16_t i = 0; i < alr->count; i++) {
-        pending_read_t *r = &alr->reads[ring_idx(alr, i)];
+        pending_read_t *r = ring_at(alr, i);
 
-        if (r->conn == conn) {
+        if (r->conn == conn && r->state != READ_STATE_CANCELLED) {
             alr->respond(conn, r->key, r->klen,
                          NULL, 0, LYGUS_ERR_NET, alr->respond_ctx);
+            r->state = READ_STATE_CANCELLED;
             r->conn = NULL;
             cancelled++;
         }
@@ -289,4 +460,5 @@ void alr_get_stats(const alr_t *alr, alr_stats_t *out) {
     out->pending_count = alr->count;
     out->slab_used = alr->slab_cursor;
     out->slab_high_water = alr->slab_high_water;
+    out->pending_read_index = (alr->pending_read_index_id != 0);
 }

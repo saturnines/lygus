@@ -1,102 +1,167 @@
 /**
-* alr.h - Almost-Local Reads (Lazy-ALR for Raft)
- * Lazy-ALR for State Machine Replication:
- * Based on: "The LAW Theorem: Local Reads and Linearizable
- * Asynchronous Replication" (Katsarakis et al., VLDB 2025)
+ * alr.h - Almost Local Reads (Lazy-ALR for Raft)
+ *
+ * Implements linearizable reads from any replica using the Lazy-ALR
+ * technique from "The LAW Theorem" paper.
+ * You must call alr_on_read_index() when ReadIndex responses arrive.
  */
-#ifndef LYGUS_ALR_H
-#define LYGUS_ALR_H
+
+#ifndef ALR_H
+#define ALR_H
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../public/lygus_errors.h"
+#include <stdbool.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "raft.h"
+#include "public/lygus_errors.h"
 
-// ============================================================================
-// Types
-// ============================================================================
-
+// Forward declarations
 typedef struct alr alr_t;
-typedef struct raft raft_t;
 typedef struct lygus_kv lygus_kv_t;
-
-/**
- * Response callback - called when read completes or fails
- */
-typedef void (*alr_respond_fn)(void *conn,
-                               const void *key, size_t klen,
-                               const void *val, size_t vlen,
-                               lygus_err_t err,
-                               void *ctx);
-
-/**
- * Configuration
- */
-typedef struct {
-    raft_t         *raft;
-    lygus_kv_t     *kv;
-    alr_respond_fn  respond;
-    void           *respond_ctx;
-    uint16_t        capacity;       // 0 = default (4096)
-    size_t          slab_size;      // 0 = default (16MB)
-} alr_config_t;
-
-// ============================================================================
-// Lifecycle
-// ============================================================================
-
-alr_t *alr_create(const alr_config_t *cfg);
-void   alr_destroy(alr_t *alr);
-
-// ============================================================================
-// Operations
-// ============================================================================
-
-/**
- * Queue a linearizable read
- *
- * @return LYGUS_OK             queued, will respond via callback
- *         LYGUS_ERR_BATCH_FULL ring or slab full, backpressure
- *         LYGUS_ERR_SYNC_FAILED couldn't propose NOOP (not leader?)
- */
-lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn);
-
-/**
- * Notify that entries have been applied
- *
- * Call from apply_entry callback. Drains reads that are now safe.
- */
-void alr_notify(alr_t *alr, uint64_t applied_index);
-
-/**
- * Cancel pending reads for a connection
- *
- * Call when connection closes. Returns number cancelled.
- */
-int alr_cancel_conn(alr_t *alr, void *conn);
 
 // ============================================================================
 // Stats
 // ============================================================================
 
 typedef struct {
-    uint64_t reads_total;       // total reads queued
-    uint64_t reads_completed;   // successfully executed
-    uint64_t reads_stale;       // killed by term change
-    uint64_t syncs_issued;      // NOOPs we paid for
-    uint64_t piggybacks;        // free rides on writes
-    uint16_t pending_count;     // current queue depth
-    size_t   slab_used;         // current slab usage
-    size_t   slab_high_water;   // peak slab usage
+    uint64_t reads_total;       // Total reads queued
+    uint64_t reads_completed;   // Successfully completed
+    uint64_t reads_stale;       // Failed due to stale sync
+    uint64_t reads_failed;      // Failed for other reasons
+
+    uint64_t syncs_issued;      // NOOPs proposed (leader)
+    uint64_t read_index_issued; // ReadIndex requests sent (follower)
+    uint64_t piggybacks;        // Syncs piggybacked on writes
+    uint64_t batched;           // Reads batched onto existing sync
+
+    // Current state
+    uint16_t pending_count;     // Reads currently queued
+    size_t   slab_used;         // Current slab usage
+    size_t   slab_high_water;   // Peak slab usage
+    bool     pending_read_index; // ReadIndex request in flight
 } alr_stats_t;
 
+// ============================================================================
+// Callbacks
+// ============================================================================
+
+/**
+ * Response callback - called when a read completes or fails.
+ *
+ * @param conn   Connection handle (from alr_read)
+ * @param key    Key that was read
+ * @param klen   Key length
+ * @param val    Value (NULL on error or not found)
+ * @param vlen   Value length
+ * @param err    Error code (LYGUS_OK on success)
+ * @param ctx    User context
+ */
+typedef void (*alr_respond_fn)(void *conn, const void *key, size_t klen,
+                                const void *val, size_t vlen,
+                                lygus_err_t err, void *ctx);
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+typedef struct {
+    raft_t         *raft;        // Required: Raft instance
+    lygus_kv_t     *kv;          // Required: KV store
+    alr_respond_fn  respond;     // Required: Response callback
+    void           *respond_ctx; // Optional: Callback context
+
+    uint16_t capacity;           // Max pending reads (default: 4096)
+    size_t   slab_size;          // Key slab size (default: 16MB)
+} alr_config_t;
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+/**
+ * Create an ALR instance.
+ */
+alr_t *alr_create(const alr_config_t *cfg);
+
+/**
+ * Destroy an ALR instance.
+ * Any pending reads will NOT receive callbacks.
+ */
+void alr_destroy(alr_t *alr);
+
+// ============================================================================
+// Core Operations
+// ============================================================================
+
+/**
+ * Queue a read request.
+ *
+ * The read will be executed once a sync point is established and applied.
+ * Response delivered via the respond callback.
+ *
+ * @param alr   ALR instance
+ * @param key   Key to read
+ * @param klen  Key length
+ * @param conn  Connection handle (passed to callback)
+ *
+ * @return LYGUS_OK           - Read queued successfully
+ *         LYGUS_ERR_BATCH_FULL - Buffer full, retry later
+ *         LYGUS_ERR_TRY_LEADER - Follower can't serve, redirect to leader
+ *         LYGUS_ERR_SYNC_FAILED - Failed to establish sync point
+ */
+lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn);
+
+/**
+ * Notify ALR that entries have been applied to the state machine.
+ *
+ * Call this from your Raft apply callback. This triggers completion
+ * of reads whose sync point has been reached.
+ *
+ * @param alr           ALR instance
+ * @param applied_index Highest applied log index
+ */
+void alr_notify(alr_t *alr, uint64_t applied_index);
+
+/**
+ * Handle ReadIndex response from leader.
+ *
+ * Call this when the Raft layer receives a ReadIndex response.
+ *
+ * @param alr     ALR instance
+ * @param req_id  Request ID (from raft_request_read_index_async)
+ * @param index   Read index returned by leader (ignored if err != 0)
+ * @param err     0 on success, non-zero on failure
+ */
+void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err);
+
+/**
+ * Notify ALR of a term change.
+ *
+ * Call this when the Raft term changes. Invalidates pending syncs
+ * and fails reads waiting on ReadIndex.
+ *
+ * @param alr       ALR instance
+ * @param new_term  The new term
+ */
+void alr_on_term_change(alr_t *alr, uint64_t new_term);
+
+/**
+ * Cancel all pending reads for a connection.
+ *
+ * Call this when a client disconnects. Callbacks will be invoked
+ * with LYGUS_ERR_NET.
+ *
+ * @param alr   ALR instance
+ * @param conn  Connection handle
+ *
+ * @return Number of reads cancelled
+ */
+int alr_cancel_conn(alr_t *alr, void *conn);
+
+/**
+ * Get statistics.
+ */
 void alr_get_stats(const alr_t *alr, alr_stats_t *out);
 
-#ifdef __cplusplus
-}
-#endif
-
-#endif // LYGUS_ALR_H
+#endif // ALR_H
