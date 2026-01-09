@@ -168,13 +168,14 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             alr->last_issued_sync = sync_index;
             alr->stats.syncs_issued++;
         } else {
-            // Follower with nothing to piggyback - use commit_index
+            // Follower with nothing to piggyback. use commit_index
             alr->last_issued_sync = raft_get_commit_index(alr->raft);
             if (alr->last_issued_sync == 0) {
-                return LYGUS_ERR_TRY_LEADER;  // no commits yet, can't serve
+                return LYGUS_ERR_TRY_LEADER;  /
             }
         }
-    // Copy key into slab
+        }
+
     void *key_ptr = alr->slab + alr->slab_cursor;
     memcpy(key_ptr, key, klen);
     alr->slab_cursor += klen;
