@@ -432,14 +432,9 @@ void handler_process(handler_t *h, conn_t *conn, const char *line, size_t len) {
 // ============================================================================
 
 void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
-    (void)term;
-    if (!h) return;
-
-    // Complete pending write
     pending_complete(h->pending, index);
-
-    // Drain ready ALR reads
-    alr_notify(h->alr, index);
+    uint64_t last_applied = raft_get_last_applied(h->raft);
+    alr_notify(h->alr, last_applied);
 }
 
 void handler_on_leadership_change(handler_t *h, bool is_leader) {
