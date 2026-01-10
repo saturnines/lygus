@@ -67,6 +67,7 @@ struct alr {
     // Sync state
     uint64_t last_issued_sync;
     uint64_t last_applied;
+    uint64_t last_issued_sync_term;
 
     // ReadIndex state
     uint64_t read_index_seq;         // Monotonic ID generator
@@ -223,12 +224,12 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 
     // Can we reuse an existing sync point?
     if (alr->last_issued_sync > 0 &&
-        alr->last_issued_sync > alr->last_applied) {
-        // Existing sync still pending - batch onto it
+        alr->last_issued_sync > alr->last_applied &&
+        current_term == alr->last_issued_sync_term) {
         sync_index = alr->last_issued_sync;
-        sync_term = current_term;
+        sync_term = alr->last_issued_sync_term;
         alr->stats.batched++;
-    }
+        }
     // Can we piggyback on a pending write?
     else {
         uint64_t pending = raft_get_pending_index(alr->raft);
@@ -237,6 +238,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             sync_index = pending;
             sync_term = current_term;
             alr->last_issued_sync = pending;
+            alr->last_issued_sync_term = current_term;
             alr->stats.piggybacks++;
         }
         else if (is_leader) {
@@ -246,6 +248,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             }
             sync_term = raft_get_term(alr->raft);  // May have changed
             alr->last_issued_sync = sync_index;
+            alr->last_issued_sync_term = sync_term;
             alr->stats.syncs_issued++;
         }
         else {
