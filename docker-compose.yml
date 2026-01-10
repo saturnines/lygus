@@ -13,6 +13,11 @@ services:
     networks:
       lygus-net:
         ipv4_address: 172.20.0.10
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    sysctls:
+      - net.ipv4.ip_forward=1
 
   node1:
     build: .
@@ -27,6 +32,11 @@ services:
     networks:
       lygus-net:
         ipv4_address: 172.20.0.11
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    sysctls:
+      - net.ipv4.ip_forward=1
 
   node2:
     build: .
@@ -41,11 +51,56 @@ services:
     networks:
       lygus-net:
         ipv4_address: 172.20.0.12
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    sysctls:
+      - net.ipv4.ip_forward=1
+
+  node3:
+    build: .
+    container_name: lygus-node3
+    hostname: node3
+    command: ["-n", "3", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "10000", "-v"]
+    ports:
+      - "8083:8080"
+    volumes:
+      - node3-data:/data
+      - ./peers.txt:/data/peers.txt:ro
+    networks:
+      lygus-net:
+        ipv4_address: 172.20.0.13
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    sysctls:
+      - net.ipv4.ip_forward=1
+
+  node4:
+    build: .
+    container_name: lygus-node4
+    hostname: node4
+    command: ["-n", "4", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "10000", "-v"]
+    ports:
+      - "8084:8080"
+    volumes:
+      - node4-data:/data
+      - ./peers.txt:/data/peers.txt:ro
+    networks:
+      lygus-net:
+        ipv4_address: 172.20.0.14
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    sysctls:
+      - net.ipv4.ip_forward=1
 
 volumes:
   node0-data:
   node1-data:
   node2-data:
+  node3-data:
+  node4-data:
 
 networks:
   lygus-net:
