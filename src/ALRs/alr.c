@@ -214,65 +214,48 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 
     bool is_leader = raft_is_leader(alr->raft);
     uint64_t current_term = raft_get_term(alr->raft);
-    uint64_t now_ms = raft_get_time_ms();
 
     uint64_t sync_index = 0;
     uint64_t sync_term = 0;
     uint64_t read_index_id = 0;
     read_state_t initial_state = READ_STATE_READY;
-    bool is_stalled = false;
 
-    if (alr->last_issued_sync > 0 &&
-        alr->last_issued_sync > alr->last_applied &&
-        current_term == alr->last_issued_sync_term) {
+    uint64_t pending = raft_get_pending_index(alr->raft);
 
-        if ((now_ms - alr->last_issued_sync_time_ms) < 50) {
-            sync_index = alr->last_issued_sync;
-            sync_term = alr->last_issued_sync_term;
-            alr->stats.batched++;
-        } else {
-            is_stalled = true;
-        }
+    if (pending > 0 && pending > alr->last_applied) {
+        sync_index = pending;
+        sync_term = current_term;
+
+        alr->last_issued_sync = pending;
+        alr->last_issued_sync_term = current_term;
+        alr->stats.piggybacks++;
     }
-
-    if (sync_index == 0) {
-        uint64_t pending = raft_get_pending_index(alr->raft);
-
-        if (!is_stalled && pending > 0 && pending > alr->last_applied) {
-            sync_index = pending;
-            sync_term = current_term;
-            alr->last_issued_sync = pending;
-            alr->last_issued_sync_term = current_term;
-            alr->last_issued_sync_time_ms = now_ms;
-            alr->stats.piggybacks++;
+    else if (is_leader) {
+        if (raft_propose_noop(alr->raft, &sync_index) != 0) {
+            return LYGUS_ERR_SYNC_FAILED;
         }
-        else if (is_leader) {
-            if (raft_propose_noop(alr->raft, &sync_index) != 0) {
-                return LYGUS_ERR_SYNC_FAILED;
-            }
-            sync_term = raft_get_term(alr->raft);
-            alr->last_issued_sync = sync_index;
-            alr->last_issued_sync_term = sync_term;
-            alr->last_issued_sync_time_ms = now_ms;
-            alr->stats.syncs_issued++;
-        }
-        else {
-            if (alr->pending_read_index_id == 0) {
-                uint64_t req_id = ++alr->read_index_seq;
-                int err = raft_request_read_index_async(alr->raft, req_id);
-                if (err != 0) {
-                    return LYGUS_ERR_TRY_LEADER;
-                }
-                alr->pending_read_index_id = req_id;
-                alr->pending_read_index_term = current_term;
-                alr->stats.read_index_issued++;
-            }
+        sync_term = raft_get_term(alr->raft);
 
-            read_index_id = alr->pending_read_index_id;
-            initial_state = READ_STATE_AWAITING_INDEX;
-        }
+        alr->last_issued_sync = sync_index;
+        alr->last_issued_sync_term = sync_term;
+        alr->stats.syncs_issued++;
     }
+    // 3. Follower logic (standard ReadIndex)
+    else {
+        if (alr->pending_read_index_id == 0) {
+            uint64_t req_id = ++alr->read_index_seq;
+            int err = raft_request_read_index_async(alr->raft, req_id);
+            if (err != 0) {
+                return LYGUS_ERR_TRY_LEADER;
+            }
+            alr->pending_read_index_id = req_id;
+            alr->pending_read_index_term = current_term;
+            alr->stats.read_index_issued++;
+        }
 
+        read_index_id = alr->pending_read_index_id;
+        initial_state = READ_STATE_AWAITING_INDEX;
+    }
     void *key_ptr = alr->slab + alr->slab_cursor;
     memcpy(key_ptr, key, klen);
     alr->slab_cursor += klen;
@@ -295,7 +278,6 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 
     return LYGUS_OK;
 }
-
 // ============================================================================
 // Core: ReadIndex response callback
 // ============================================================================
