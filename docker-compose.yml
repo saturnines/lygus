@@ -1,11 +1,10 @@
 version: '3.8'
-
 services:
   node0:
     build: .
     container_name: lygus-node0
     hostname: node0
-    command: ["-n", "0", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "50", "-v"]
+    command: ["-n", "0", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "10000", "-v"]
     ports:
       - "8080:8080"
     volumes:
@@ -19,7 +18,7 @@ services:
     build: .
     container_name: lygus-node1
     hostname: node1
-    command: ["-n", "1", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "50", "-v"]
+    command: ["-n", "1", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "10000", "-v"]
     ports:
       - "8081:8080"
     volumes:
@@ -33,7 +32,7 @@ services:
     build: .
     container_name: lygus-node2
     hostname: node2
-    command: ["-n", "2", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "50", "-v"]
+    command: ["-n", "2", "-p", "/data/peers.txt", "-d", "/data", "-l", "8080", "-s", "10000", "-v"]
     ports:
       - "8082:8080"
     volumes:
