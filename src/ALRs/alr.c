@@ -68,6 +68,7 @@ struct alr {
     uint64_t last_issued_sync;
     uint64_t last_applied;
     uint64_t last_issued_sync_term;
+    uint64_t last_issued_sync_time_ms;
 
     // ReadIndex state
     uint64_t read_index_seq;         // Monotonic ID generator
@@ -199,12 +200,10 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    // Ring full?
     if (alr->count >= alr->capacity) {
         return LYGUS_ERR_BATCH_FULL;
     }
 
-    // Slab space check
     if (alr->slab_cursor + klen > alr->slab_size) {
         if (alr->count == 0) {
             alr->slab_cursor = 0;
@@ -215,22 +214,21 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 
     bool is_leader = raft_is_leader(alr->raft);
     uint64_t current_term = raft_get_term(alr->raft);
+    uint64_t now_ms = raft_get_time_ms();
 
-    // Determine sync strategy
     uint64_t sync_index = 0;
     uint64_t sync_term = 0;
     uint64_t read_index_id = 0;
     read_state_t initial_state = READ_STATE_READY;
 
-    // Can we reuse an existing sync point?
     if (alr->last_issued_sync > 0 &&
         alr->last_issued_sync > alr->last_applied &&
-        current_term == alr->last_issued_sync_term) {
+        current_term == alr->last_issued_sync_term &&
+        (now_ms - alr->last_issued_sync_time_ms) < 1000) {
         sync_index = alr->last_issued_sync;
         sync_term = alr->last_issued_sync_term;
         alr->stats.batched++;
-        }
-    // Can we piggyback on a pending write?
+    }
     else {
         uint64_t pending = raft_get_pending_index(alr->raft);
 
@@ -239,16 +237,17 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             sync_term = current_term;
             alr->last_issued_sync = pending;
             alr->last_issued_sync_term = current_term;
+            alr->last_issued_sync_time_ms = now_ms;
             alr->stats.piggybacks++;
         }
         else if (is_leader) {
-            // Leader proposes NOOP
             if (raft_propose_noop(alr->raft, &sync_index) != 0) {
                 return LYGUS_ERR_SYNC_FAILED;
             }
-            sync_term = raft_get_term(alr->raft);  // May have changed
+            sync_term = raft_get_term(alr->raft);
             alr->last_issued_sync = sync_index;
             alr->last_issued_sync_term = sync_term;
+            alr->last_issued_sync_time_ms = now_ms;
             alr->stats.syncs_issued++;
         }
         else {
@@ -268,7 +267,6 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         }
     }
 
-    // Copy key to slab
     void *key_ptr = alr->slab + alr->slab_cursor;
     memcpy(key_ptr, key, klen);
     alr->slab_cursor += klen;
@@ -277,7 +275,6 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         alr->slab_high_water = alr->slab_cursor;
     }
 
-    // Queue the read
     pending_read_t *r = ring_tail(alr);
     r->conn = conn;
     r->key = key_ptr;
