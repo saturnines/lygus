@@ -220,19 +220,25 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     uint64_t sync_term = 0;
     uint64_t read_index_id = 0;
     read_state_t initial_state = READ_STATE_READY;
+    bool is_stalled = false;
 
     if (alr->last_issued_sync > 0 &&
         alr->last_issued_sync > alr->last_applied &&
-        current_term == alr->last_issued_sync_term &&
-        (now_ms - alr->last_issued_sync_time_ms) < 1000) {
-        sync_index = alr->last_issued_sync;
-        sync_term = alr->last_issued_sync_term;
-        alr->stats.batched++;
+        current_term == alr->last_issued_sync_term) {
+
+        if ((now_ms - alr->last_issued_sync_time_ms) < 50) {
+            sync_index = alr->last_issued_sync;
+            sync_term = alr->last_issued_sync_term;
+            alr->stats.batched++;
+        } else {
+            is_stalled = true;
+        }
     }
-    else {
+
+    if (sync_index == 0) {
         uint64_t pending = raft_get_pending_index(alr->raft);
 
-        if (pending > 0 && pending > alr->last_applied) {
+        if (!is_stalled && pending > 0 && pending > alr->last_applied) {
             sync_index = pending;
             sync_term = current_term;
             alr->last_issued_sync = pending;
