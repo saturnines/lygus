@@ -330,6 +330,7 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     // Promote waiting reads to ready state
     promote_reads_for_read_index(alr, req_id, index, index_term);
     alr->last_issued_sync = index;
+    alr->last_issued_sync_term = index_term;
 
     // Try to complete any now-ready reads
     alr_notify(alr, alr->last_applied);
