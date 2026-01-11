@@ -242,7 +242,8 @@ int glue_broadcast_inv(raft_glue_ctx_t *ctx, const void *key, size_t klen);
 int glue_send_readindex(void *ctx, int peer_id, const raft_readindex_req_t *req);
 
 
-int glue_send_readindex_resp(void *ctx, int peer_id, const raft_readindex_req_t *req);
+int glue_send_readindex_resp(void *ctx, int peer_id, uint64_t req_id,
+                             uint64_t index, int err);
 
 
 // ============================================================================
