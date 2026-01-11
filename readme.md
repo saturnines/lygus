@@ -3,7 +3,6 @@
 Distributed KV store with Raft consensus and with linearizable reads.
 
 
-THIS IS CURRENTLY UNDER TESTING HENCE THE KINDA
 ## Quick Start
 ```bash
 docker compose up --build
@@ -13,10 +12,12 @@ This starts a 3-node cluster:
 - Node 0: localhost:8080
 - Node 1: localhost:8081  
 - Node 2: localhost:8082
+- Node 3: localhost:8083
+- Node 4: localhost:8084
 
 ## Usage
 ```bash
-# Check status (shows role, leader id, term)
+# Check status (shows role, leader id, term) This is an example assuming the leader is under Node 0.
 echo "STATUS" | nc localhost 8080
 
 # Write to leader
@@ -41,7 +42,7 @@ docker logs -f lygus-node1
 docker start lygus-node0
 ```
 
-Data survives leader failover as long as quorum (2/3 nodes) is maintained.
+Data survives leader failover as long as quorum is maintained.
 
 ## Cleanup
 ```bash
@@ -51,3 +52,10 @@ docker compose down -v
 ## License
 
 MIT
+
+## TODO 
+
+Benchmark
+Run longer Jepsen Tests
+Cleanup
+
