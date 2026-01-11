@@ -236,6 +236,12 @@ int glue_process_inv(raft_glue_ctx_t *ctx,
  */
 int glue_broadcast_inv(raft_glue_ctx_t *ctx, const void *key, size_t klen);
 
+/**
+ * Read index from raft
+ */
+int glue_send_readindex(void *ctx, int peer_id, const raft_readindex_req_t *req);
+
+
 // ============================================================================
 // Helper: Build callbacks struct
 // ============================================================================
@@ -262,6 +268,7 @@ static inline raft_callbacks_t glue_make_callbacks(void) {
         // Network
         .send_requestvote   = glue_send_requestvote,
         .send_appendentries = glue_send_appendentries,
+        .send_readindex     = glue_send_readindex,
 
         // Snapshots
         .snapshot_create      = glue_snapshot_create,
