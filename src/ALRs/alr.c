@@ -325,12 +325,28 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
 // Core: Notification that entries have been applied
 // ============================================================================
 
+// Note to self might want to add alr->stats.snapshot_invalid++ if I want to check stale due to leader change or stale to snapshots
+
 void alr_notify(alr_t *alr, uint64_t applied_index) {
     if (!alr) return;
 
-    if (applied_index > alr->last_applied) {
+    if (applied_index < alr->last_applied) {
+        for (uint16_t i = 0; i < alr->count; i++) {
+            pending_read_t *r = ring_at(alr, i);
+            if (r->state != READ_STATE_CANCELLED && r->conn) {
+                alr->respond(r->conn, r->key, r->klen,
+                            NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+                alr->stats.reads_stale++;
+            }
+        }
+        alr->head = 0;
+        alr->count = 0;
+        alr->slab_cursor = 0;
         alr->last_applied = applied_index;
+        return;
     }
+
+    alr->last_applied = applied_index;
 
     if (alr->count == 0) return;
 
@@ -339,28 +355,23 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
     while (alr->count > 0) {
         pending_read_t *r = ring_head(alr);
 
-        // Skip cancelled reads
         if (r->state == READ_STATE_CANCELLED) {
             alr->head = ring_idx(alr, 1);
             alr->count--;
             continue;
         }
 
-        // Still waiting for ReadIndex response
         if (r->state == READ_STATE_AWAITING_INDEX) {
             break;
         }
 
-        // Not applied yet
         if (r->sync_index > alr->last_applied) {
             break;
         }
 
-        // Verify the entry at sync_index hasn't been overwritten (leader change)
         uint64_t term_at_sync = raft_log_term_at(alr->raft, r->sync_index);
 
         if (term_at_sync != r->sync_term || term_at_sync == 0) {
-            // Log was truncated/overwritten, stale read
             if (r->conn != NULL) {
                 alr->respond(r->conn, r->key, r->klen,
                              NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
@@ -371,7 +382,6 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
             continue;
         }
 
-        // Safe to read, sync committed and entry unchanged
         ssize_t vlen = lygus_kv_get(alr->kv, r->key, r->klen,
                                      val_buf, sizeof(val_buf));
 
@@ -390,7 +400,6 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
         alr->stats.reads_completed++;
     }
 
-    // Reset slab when fully drained
     if (alr->count == 0) {
         alr->slab_cursor = 0;
     }
