@@ -8,7 +8,7 @@ Distributed KV store with Raft consensus and with linearizable reads.
 docker compose up --build
 ```
 
-This starts a 3-node cluster:
+This starts a 5-node cluster:
 - Node 0: localhost:8080
 - Node 1: localhost:8081  
 - Node 2: localhost:8082
@@ -56,6 +56,8 @@ MIT
 ## TODO 
 
 Benchmark
+
 Run longer Jepsen Tests
+
 Cleanup
 
