@@ -8,6 +8,13 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra)
 endif()
 
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+
+if(ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -g -O0 -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
+endif()
+
 # =============================================================================
 # Dependencies
 # =============================================================================
@@ -17,7 +24,7 @@ set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(BUILD_STATIC ON CACHE BOOL "" FORCE)
 
 add_subdirectory(deps/libzmq)
-add_subdirectory(deps/lil-raft) # <--- KEEP THIS
+add_subdirectory(deps/lil-raft)
 
 # =============================================================================
 # Platform Sources
