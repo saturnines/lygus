@@ -1010,3 +1010,18 @@ int glue_send_readindex(void *ctx, int peer_id, const raft_readindex_req_t *req)
     return network_send_raft(g->network, peer_id, MSG_READINDEX_REQ,
                              req, sizeof(*req));
 }
+
+int glue_send_readindex_resp(void *ctx, int peer_id, uint64_t req_id,
+                             uint64_t index, int err) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->network) return LYGUS_ERR_INVALID_ARG;
+
+    raft_readindex_resp_t resp = {
+        .req_id = req_id,
+        .read_index = index,
+        .err = err
+    };
+
+    return network_send_raft(g->network, peer_id, MSG_READINDEX_RESP,
+                             &resp, sizeof(resp));
+}
