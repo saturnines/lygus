@@ -1002,3 +1002,11 @@ int glue_broadcast_inv(raft_glue_ctx_t *ctx, const void *key, size_t klen)
     if (!ctx || !ctx->network) return LYGUS_ERR_INVALID_ARG;
     return network_broadcast_inv(ctx->network, key, klen);
 }
+
+int glue_send_readindex(void *ctx, int peer_id, const raft_readindex_req_t *req) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->network || !req) return LYGUS_ERR_INVALID_ARG;
+
+    return network_send_raft(g->network, peer_id, MSG_READINDEX_REQ,
+                             req, sizeof(*req));
+}
