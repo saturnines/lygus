@@ -229,17 +229,14 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         alr->stats.piggybacks++;
     }
     else if (is_leader) {
-        uint64_t req_id = ++alr->read_index_seq;
-        int err = raft_request_read_index_async(alr->raft, req_id);
-
-        if (err != 0) {
+        if (raft_propose_noop(alr->raft, &sync_index) != 0) {
             return LYGUS_ERR_SYNC_FAILED;
         }
+        sync_term = raft_get_term(alr->raft);
 
-        read_index_id = req_id;
-        initial_state = READ_STATE_AWAITING_INDEX;
-
-        alr->stats.read_index_issued++;
+        alr->last_issued_sync = sync_index;
+        alr->last_issued_sync_term = sync_term;
+        alr->stats.syncs_issued++;
     }
     else {
         uint64_t req_id = ++alr->read_index_seq;
