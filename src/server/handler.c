@@ -432,7 +432,7 @@ void handler_process(handler_t *h, conn_t *conn, const char *line, size_t len) {
 // ============================================================================
 
 void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
-    pending_complete(h->pending, index);
+    pending_complete(h->pending, index); //
     uint64_t last_applied = raft_get_last_applied(h->raft);
     alr_notify(h->alr, last_applied);
 }
