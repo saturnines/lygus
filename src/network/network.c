@@ -43,6 +43,10 @@ struct network {
     void *inv_pub;                  // PUB - broadcasts INV
     void *inv_sub;                  // SUB - receives INV from all
 
+    // Internal signaling (The Doorbell)
+    void *pipe_send;                // Main thread signals here
+    void *pipe_recv;                // Network thread listens here
+
     // Mailboxes
     mailbox_t *raft_inbox;   // Incoming Raft messages
     mailbox_t *raft_outbox;  // Outgoing Raft messages
@@ -134,16 +138,24 @@ static void *network_thread_func(void *arg)
             }
         }
 
-        // 2. Poll for incoming
+        // 2. Poll for incoming (Traffic OR Doorbell)
         zmq_pollitem_t items[] = {
             { net->raft_router, 0, ZMQ_POLLIN, 0 },
             { net->inv_sub,     0, ZMQ_POLLIN, 0 },
+            { net->pipe_recv,   0, ZMQ_POLLIN, 0 }, // Check for wake-up signal
         };
 
-        int rc = zmq_poll(items, 2, POLL_TIMEOUT_MS);
+        int rc = zmq_poll(items, 3, POLL_TIMEOUT_MS);
         if (rc < 0) {
             if (errno == EINTR) continue;
             break;
+        }
+
+        // Check if we were woken up by the main thread
+        if (items[2].revents & ZMQ_POLLIN) {
+            uint8_t dummy[1];
+            zmq_recv(net->pipe_recv, dummy, 1, ZMQ_DONTWAIT);
+            // No action needed, loop handles outbox drainage
         }
 
         // 3. Receive Raft messages (ROUTER)
@@ -250,6 +262,18 @@ network_t *network_create(const network_config_t *cfg)
 
     int linger = 0;
 
+    // Create wake-up pipe
+    net->pipe_send = zmq_socket(net->zmq_ctx, ZMQ_PAIR);
+    net->pipe_recv = zmq_socket(net->zmq_ctx, ZMQ_PAIR);
+    if (!net->pipe_send || !net->pipe_recv) goto fail;
+
+    // Bind unique inproc address per network instance
+    char pipe_addr[64];
+    snprintf(pipe_addr, sizeof(pipe_addr), "inproc://net_wakeup_%p", (void*)net);
+
+    zmq_bind(net->pipe_send, pipe_addr);
+    zmq_connect(net->pipe_recv, pipe_addr);
+
     // Raft ROUTER
     net->raft_router = zmq_socket(net->zmq_ctx, ZMQ_ROUTER);
     if (!net->raft_router) goto fail;
@@ -324,6 +348,8 @@ void network_destroy(network_t *net)
     if (net->raft_router) zmq_close(net->raft_router);
     if (net->inv_pub) zmq_close(net->inv_pub);
     if (net->inv_sub) zmq_close(net->inv_sub);
+    if (net->pipe_send) zmq_close(net->pipe_send);
+    if (net->pipe_recv) zmq_close(net->pipe_recv);
 
     for (int i = 0; i < net->num_peers; i++) {
         if (net->raft_dealers[i]) zmq_close(net->raft_dealers[i]);
@@ -354,6 +380,10 @@ void network_stop(network_t *net)
 {
     if (!net || !net->running) return;
     net->running = 0;
+
+    // Wake up thread so it can exit
+    if (net->pipe_send) zmq_send(net->pipe_send, "", 0, ZMQ_DONTWAIT);
+
     pthread_join(net->net_thread, NULL);
 }
 
@@ -384,6 +414,10 @@ int network_send_raft(network_t *net, int peer_id, uint8_t msg_type,
         free(data_copy);
         return -1;
     }
+
+    // Wake up the network thread immediately
+    zmq_send(net->pipe_send, "", 0, ZMQ_DONTWAIT);
+
     return 0;
 }
 
@@ -436,7 +470,7 @@ int network_recv_inv(network_t *net, int *from_id, void *key_buf, size_t buf_cap
 }
 
 // ============================================================================
-// Event Loop
+// Event Loop Integration
 // ============================================================================
 
 lygus_fd_t network_get_notify_fd(const network_t *net)
