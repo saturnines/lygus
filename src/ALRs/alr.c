@@ -231,7 +231,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     else if (is_leader) {
         uint64_t req_id = ++alr->read_index_seq;
         int err = raft_request_read_index_async(alr->raft, req_id);
-        /
+
         if (err != 0) {
             return LYGUS_ERR_SYNC_FAILED;
         }
