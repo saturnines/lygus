@@ -4,16 +4,12 @@
  * Implements linearizable reads from any replica using the Lazy-ALR
  * technique from "The LAW Theorem" paper.
  *
- * Memory model:
- * - Ring buffer for metadata (fixed slots)
- * - Linear slab for keys (bump allocator, reset on drain)
- *
  * Sync strategies (in priority order):
  * 1. Piggyback on pending log entry (leader or follower)
  * 2. Leader: propose NOOP
  * 3. Follower: async ReadIndex RPC to leader
  */
-//
+
 #include "alr.h"
 #include "raft.h"
 #include "public/lygus_errors.h"
@@ -73,6 +69,9 @@ struct alr {
     // ReadIndex state
     uint64_t read_index_seq;         // Monotonic ID generator
 
+    // Tracks the currently in-flight sync batch  (This might be insane)
+    uint64_t active_read_index_id;   // 0 if no sync is in progress
+
     // Dependencies
     raft_t         *raft;
     lygus_kv_t     *kv;
@@ -130,7 +129,7 @@ static void fail_reads_for_read_index(alr_t *alr, uint64_t read_index_id, lygus_
 // ============================================================================
 
 static void promote_reads_for_read_index(alr_t *alr, uint64_t read_index_id,
-                                          uint64_t sync_index, uint64_t sync_term) {
+                                         uint64_t sync_index, uint64_t sync_term) {
     for (uint16_t i = 0; i < alr->count; i++) {
         pending_read_t *r = ring_at(alr, i);
 
@@ -239,14 +238,28 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         alr->stats.syncs_issued++;
     }
     else {
-        uint64_t req_id = ++alr->read_index_seq;
-        int err = raft_request_read_index_async(alr->raft, req_id);
-        if (err != 0) {
-            return LYGUS_ERR_TRY_LEADER;
+        // Opportunistic Batching for Followers
+        if (alr->active_read_index_id != 0) {
+            // A bus (sync batch) is already on the road. Piggyback on it.
+            read_index_id = alr->active_read_index_id;
+            initial_state = READ_STATE_AWAITING_INDEX;
+            alr->stats.piggybacks++;
         }
-        read_index_id = req_id;
-        initial_state = READ_STATE_AWAITING_INDEX;
-        alr->stats.read_index_issued++;
+        else {
+            // No bus active. Start a new one.
+            uint64_t req_id = ++alr->read_index_seq;
+            int err = raft_request_read_index_async(alr->raft, req_id);
+            if (err != 0) {
+                return LYGUS_ERR_TRY_LEADER;
+            }
+
+            // Mark this ID as active. Everyone else waits for this.
+            alr->active_read_index_id = req_id;
+
+            read_index_id = req_id;
+            initial_state = READ_STATE_AWAITING_INDEX;
+            alr->stats.read_index_issued++;
+        }
     }
 
     void *key_ptr = alr->slab + alr->slab_cursor;
@@ -278,6 +291,11 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 
 void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     if (!alr) return;
+
+    // next batch.
+    if (req_id == alr->active_read_index_id) {
+        alr->active_read_index_id = 0;
+    }
 
     if (err != 0) {
         fail_reads_for_read_index(alr, req_id, LYGUS_ERR_TRY_LEADER);
@@ -315,7 +333,7 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
             pending_read_t *r = ring_at(alr, i);
             if (r->state != READ_STATE_CANCELLED && r->conn) {
                 alr->respond(r->conn, r->key, r->klen,
-                            NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+                             NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
                 alr->stats.reads_stale++;
             }
         }
@@ -399,6 +417,9 @@ void alr_on_term_change(alr_t *alr, uint64_t new_term) {
 
     // Invalidate cached sync point
     alr->last_issued_sync = 0;
+
+    // [ALR FIX] Clear active batch
+    alr->active_read_index_id = 0;
 }
 
 // ============================================================================
@@ -436,5 +457,5 @@ void alr_get_stats(const alr_t *alr, alr_stats_t *out) {
     out->pending_count = alr->count;
     out->slab_used = alr->slab_cursor;
     out->slab_high_water = alr->slab_high_water;
-    out->pending_read_index = 0;
+    out->pending_read_index = alr->active_read_index_id != 0 ? 1 : 0;
 }
