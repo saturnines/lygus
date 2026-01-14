@@ -71,6 +71,7 @@ struct alr {
 
     // Tracks the currently in-flight sync batch  (This might be insane)
     uint64_t active_read_index_id;   // 0 if no sync is in progress
+    uint64_t active_read_index_term; // Term when the active ReadIndex was issued
 
     // Dependencies
     raft_t         *raft;
@@ -255,6 +256,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 
             // Mark this ID as active. Everyone else waits for this.
             alr->active_read_index_id = req_id;
+            alr->active_read_index_term = current_term;  // Track term for stale response detection
 
             read_index_id = req_id;
             initial_state = READ_STATE_AWAITING_INDEX;
@@ -292,9 +294,18 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     if (!alr) return;
 
-    // next batch.
+    uint64_t current_term = raft_get_term(alr->raft);
+
+    // Check if this response is from an old term
     if (req_id == alr->active_read_index_id) {
+        if (alr->active_read_index_term < current_term) {
+            fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
+            alr->active_read_index_id = 0;
+            alr->active_read_index_term = 0;
+            return;
+        }
         alr->active_read_index_id = 0;
+        alr->active_read_index_term = 0;
     }
 
     if (err != 0) {
@@ -305,7 +316,8 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     // Get the term of the entry at the read index
     uint64_t index_term = raft_log_term_at(alr->raft, index);
     if (index_term == 0) {
-        // Safe to ignore if log compacted/snapshot, wait logic in alr_notify handles ordering
+        fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
+        return;
     }
 
     // Promote waiting reads to ready state
@@ -412,14 +424,26 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 void alr_on_term_change(alr_t *alr, uint64_t new_term) {
     if (!alr) return;
 
-    // Fail all pending ReadIndex waits since their leadership guarantee is void
-    fail_reads_for_read_index(alr, 0, LYGUS_ERR_STALE_READ);
+
+    for (uint16_t i = 0; i < alr->count; i++) {
+        pending_read_t *r = ring_at(alr, i);
+
+        if (r->state != READ_STATE_CANCELLED && r->conn != NULL) {
+            alr->respond(r->conn, r->key, r->klen,
+                         NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+            r->state = READ_STATE_CANCELLED;
+            r->conn = NULL;
+            alr->stats.reads_stale++;
+        }
+    }
 
     // Invalidate cached sync point
     alr->last_issued_sync = 0;
+    alr->last_issued_sync_term = 0;
 
-    // [ALR FIX] Clear active batch
+    // Clear active batch tracking
     alr->active_read_index_id = 0;
+    alr->active_read_index_term = 0;
 }
 
 // ============================================================================
