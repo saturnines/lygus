@@ -13,7 +13,7 @@
  * 2. Leader: propose NOOP
  * 3. Follower: async ReadIndex RPC to leader
  */
-
+//
 #include "alr.h"
 #include "raft.h"
 #include "public/lygus_errors.h"
