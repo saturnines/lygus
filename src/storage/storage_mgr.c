@@ -458,32 +458,32 @@ int storage_mgr_log_raw(storage_mgr_t *mgr,
 int storage_mgr_apply_put(storage_mgr_t *mgr,
                           uint64_t index, uint64_t term,
                           const void *key, size_t key_len,
-                          const void *val, size_t val_len)
+                          const void *val, size_t val_len,
+                          storage_complete_cb cb,
+                          void *cb_ctx)
 {
-    if (!mgr || !key) {
-        return LYGUS_ERR_INVALID_ARG;
-    }
-
-    if (index != mgr->applied_index + 1) {
-        LOG_ERROR(LYGUS_MODULE_STORAGE, LYGUS_EVENT_APPLY_STALLED,
-                  index, mgr->applied_index, NULL, 0);
-        return LYGUS_ERR_INVALID_ARG;
-    }
+    if (!mgr || !key) return LYGUS_ERR_INVALID_ARG;
 
     int ret = lygus_kv_put(mgr->kv, key, key_len, val, val_len);
-    if (ret != LYGUS_OK) {
-        return ret;
+
+    if (ret == LYGUS_OK) {
+        mgr->applied_index = index;
+        mgr->applied_term = term;
     }
 
-    mgr->applied_index = index;
-    mgr->applied_term = term;
+
+    if (cb) {
+        cb(cb_ctx, ret);
+    }
 
     return LYGUS_OK;
 }
 
 int storage_mgr_apply_del(storage_mgr_t *mgr,
                           uint64_t index, uint64_t term,
-                          const void *key, size_t key_len)
+                          const void *key, size_t key_len,
+                          storage_complete_cb cb,
+                          void *cb_ctx)
 {
     if (!mgr || !key) {
         return LYGUS_ERR_INVALID_ARG;
@@ -496,12 +496,18 @@ int storage_mgr_apply_del(storage_mgr_t *mgr,
     }
 
     int ret = lygus_kv_del(mgr->kv, key, key_len);
-    if (ret != LYGUS_OK && ret != LYGUS_ERR_KEY_NOT_FOUND) {
-        return ret;
+
+    if (ret == LYGUS_OK || ret == LYGUS_ERR_KEY_NOT_FOUND) {
+        mgr->applied_index = index;
+        mgr->applied_term = term;
+        if (ret == LYGUS_ERR_KEY_NOT_FOUND) {
+            ret = LYGUS_OK;
+        }
     }
 
-    mgr->applied_index = index;
-    mgr->applied_term = term;
+    if (cb) {
+        cb(cb_ctx, ret);
+    }
 
     return LYGUS_OK;
 }
