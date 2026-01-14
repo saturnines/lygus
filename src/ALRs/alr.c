@@ -220,7 +220,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 
     uint64_t pending = raft_get_pending_index(alr->raft);
 
-    if (pending > 0 && pending > alr->last_applied) {
+    if (is_leader && pending > 0 && pending > alr->last_applied) {
         sync_index = pending;
         sync_term = current_term;
 
