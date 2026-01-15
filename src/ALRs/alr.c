@@ -69,7 +69,7 @@ struct alr {
     // ReadIndex state
     uint64_t read_index_seq;         // Monotonic ID generator
 
-    // Tracks the currently in-flight sync batch  (This might be insane)
+    // Tracks the currently in-flight sync batch
     uint64_t active_read_index_id;   // 0 if no sync is in progress
     uint64_t active_read_index_term; // Term when the active ReadIndex was issued
 
@@ -202,12 +202,9 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         return LYGUS_ERR_BATCH_FULL;
     }
 
+    // If we run out of memory, we must fail and wait for drain.
     if (alr->slab_cursor + klen > alr->slab_size) {
-        if (alr->count == 0) {
-            alr->slab_cursor = 0;
-        } else {
-            return LYGUS_ERR_BATCH_FULL;
-        }
+        return LYGUS_ERR_BATCH_FULL;
     }
 
     bool is_leader = raft_is_leader(alr->raft);
@@ -247,7 +244,6 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             alr->stats.piggybacks++;
         }
         else {
-            // No bus active. Start a new one.
             uint64_t req_id = ++alr->read_index_seq;
             int err = raft_request_read_index_async(alr->raft, req_id);
             if (err != 0) {
@@ -256,7 +252,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
 
             // Mark this ID as active. Everyone else waits for this.
             alr->active_read_index_id = req_id;
-            alr->active_read_index_term = current_term;  // Track term for stale response detection
+            alr->active_read_index_term = current_term;  // Track term to detect zombie responses
 
             read_index_id = req_id;
             initial_state = READ_STATE_AWAITING_INDEX;
@@ -297,8 +293,8 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     uint64_t current_term = raft_get_term(alr->raft);
 
     if (req_id == alr->active_read_index_id) {
+        //  If the response is from an old term, ignore it.
         if (alr->active_read_index_term < current_term) {
-            // Response is from before a term change - reject it
             fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
             alr->active_read_index_id = 0;
             alr->active_read_index_term = 0;
@@ -340,6 +336,7 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
 void alr_notify(alr_t *alr, uint64_t applied_index) {
     if (!alr) return;
 
+    // Safety: If index rolled back, fail everything
     if (applied_index < alr->last_applied) {
         for (uint16_t i = 0; i < alr->count; i++) {
             pending_read_t *r = ring_at(alr, i);
@@ -412,6 +409,7 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
         alr->stats.reads_completed++;
     }
 
+    // This is the only place we trust the cursor to reset, ensuring no overwrites.
     if (alr->count == 0) {
         alr->slab_cursor = 0;
     }
@@ -424,29 +422,25 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 void alr_on_term_change(alr_t *alr, uint64_t new_term) {
     if (!alr) return;
 
-    // 1. Respond to everyone currently waiting
+    // 1. Respond to everyone currently waiting with a retryable error
     for (uint16_t i = 0; i < alr->count; i++) {
         pending_read_t *r = ring_at(alr, i);
 
         if (r->state != READ_STATE_CANCELLED && r->conn != NULL) {
-            // Inform the client the read failed due to cluster instability
             alr->respond(r->conn, r->key, r->klen,
                          NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
         }
     }
 
+    // HARD RESET
     alr->head = 0;
     alr->count = 0;
-    // reset the memory slab
     alr->slab_cursor = 0;
-    // Invalidate cached sync point
     alr->last_issued_sync = 0;
     alr->last_issued_sync_term = 0;
-    // clear active batch tracking
     alr->active_read_index_id = 0;
     alr->active_read_index_term = 0;
-
-
+}
 
 // ============================================================================
 // Core: Cancel reads for a connection
