@@ -398,13 +398,7 @@ int wal_writer_append(wal_writer_t *w,
         }
     }
 
-    // Can optimize with batching at the raft layer (This Fsync before returning but this should be moved.
-    int ret = wal_writer_flush(w, 1);  // Force flush + sync
-    if (ret < 0) {
-        return ret;
-    }
-
-    return LYGUS_OK;  // Now guaranteed durable
+    return LYGUS_OK;
 }
 
 int wal_writer_flush(wal_writer_t *w, int sync) {
