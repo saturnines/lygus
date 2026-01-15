@@ -203,6 +203,8 @@ int glue_send_appendentries(void *ctx, int peer_id,
 int glue_send_installsnapshot(void *ctx, int peer_id,
                               const raft_installsnapshot_req_t *req);
 
+int glue_log_fsync(void *ctx);
+
 // ============================================================================
 // Network Processing (call from main loop)
 // ============================================================================
@@ -283,6 +285,9 @@ static inline raft_callbacks_t glue_make_callbacks(void) {
         .snapshot_write       = glue_snapshot_write,
         .snapshot_restore     = glue_snapshot_restore,
         .send_installsnapshot = glue_send_installsnapshot,
+
+        // Fsync
+        .log_fsync          = glue_log_fsync,
     };
 }
 

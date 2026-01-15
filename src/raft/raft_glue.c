@@ -1025,3 +1025,9 @@ int glue_send_readindex_resp(void *ctx, int peer_id, uint64_t req_id,
     return network_send_raft(g->network, peer_id, MSG_READINDEX_RESP,
                              &resp, sizeof(resp));
 }
+
+int glue_log_fsync(void *ctx) {
+    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
+    if (!g || !g->storage) return -1;
+    return storage_mgr_log_fsync(g->storage);
+}
