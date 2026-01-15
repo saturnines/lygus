@@ -19,7 +19,7 @@
 // ============================================================================
 
 #define DEFAULT_BACKLOG          64
-#define DEFAULT_MAX_CONNECTIONS  256
+#define DEFAULT_MAX_CONNECTIONS  1024
 #define DEFAULT_MAX_REQUEST      (1024 * 1024)
 #define DEFAULT_BUFFER_SIZE      4096
 
