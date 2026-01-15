@@ -53,10 +53,6 @@ typedef struct lygus_kv lygus_kv_t;
 // Internal
 typedef struct server server_t;
 
-// ALR NONSENSE
-typedef struct alr alr_t;
-
-
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -145,13 +141,9 @@ void server_on_leadership_change(server_t *srv, bool is_leader);
  * Log truncation - call from log_truncate_after callback
  */
 void server_on_log_truncate(server_t *srv, uint64_t from_index);
-    
+
 void server_on_readindex_complete(server_t *srv, uint64_t req_id,
                                    uint64_t read_index, int err);
-
-// get internal alr instance
-alr_t *server_get_alr(const server_t *srv);
-
 // ============================================================================
 // Stats
 // ============================================================================

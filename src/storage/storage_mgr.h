@@ -128,7 +128,7 @@ int storage_mgr_log_raw(storage_mgr_t *mgr,
 // ============================================================================
 // Moment 2: Apply Operations (after commit)
 // ============================================================================
-typedef void (*storage_complete_cb)(void *ctx, int status);
+
 /**
  * Apply a PUT to the KV store
  *
@@ -140,9 +140,8 @@ typedef void (*storage_complete_cb)(void *ctx, int status);
 int storage_mgr_apply_put(storage_mgr_t *mgr,
                           uint64_t index, uint64_t term,
                           const void *key, size_t key_len,
-                          const void *val, size_t val_len,
-                          storage_complete_cb cb,
-                          void *cb_ctx);
+                          const void *val, size_t val_len);
+
 /**
  * Apply a DELETE to the KV store
  *
@@ -150,9 +149,8 @@ int storage_mgr_apply_put(storage_mgr_t *mgr,
  */
 int storage_mgr_apply_del(storage_mgr_t *mgr,
                           uint64_t index, uint64_t term,
-                          const void *key, size_t key_len,
-                          storage_complete_cb cb,
-                          void *cb_ctx);
+                          const void *key, size_t key_len);
+
 /**
  * Apply a NOOP (advances applied_index without KV change)
  *
