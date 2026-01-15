@@ -349,8 +349,6 @@ int main(int argc, char **argv) {
         ret = 1; goto cleanup_network;
     }
 
-    // Experimentak
-    g_app.glue_ctx.alr = server_get_alr(g_app.server);
 
     // --- Setup tick timer ---
     g_app.last_tick_ms = event_loop_now_ms(g_app.loop);
