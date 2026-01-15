@@ -424,27 +424,29 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 void alr_on_term_change(alr_t *alr, uint64_t new_term) {
     if (!alr) return;
 
-
+    // 1. Respond to everyone currently waiting
     for (uint16_t i = 0; i < alr->count; i++) {
         pending_read_t *r = ring_at(alr, i);
 
         if (r->state != READ_STATE_CANCELLED && r->conn != NULL) {
+            // Inform the client the read failed due to cluster instability
             alr->respond(r->conn, r->key, r->klen,
                          NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
-            r->state = READ_STATE_CANCELLED;
-            r->conn = NULL;
-            alr->stats.reads_stale++;
         }
     }
 
+    alr->head = 0;
+    alr->count = 0;
+    // reset the memory slab
+    alr->slab_cursor = 0;
     // Invalidate cached sync point
     alr->last_issued_sync = 0;
     alr->last_issued_sync_term = 0;
-
-    // Clear active batch tracking
+    // clear active batch tracking
     alr->active_read_index_id = 0;
     alr->active_read_index_term = 0;
-}
+
+
 
 // ============================================================================
 // Core: Cancel reads for a connection
