@@ -107,6 +107,9 @@ void handler_tick(handler_t *h, uint64_t now_ms);
 // need to comment
 void handler_on_readindex_complete(handler_t *h, uint64_t req_id,
                                     uint64_t read_index, int err);
+
+struct alr;
+struct alr *handler_get_alr(const handler_t *h);
 // ============================================================================
 // Stats
 // ============================================================================

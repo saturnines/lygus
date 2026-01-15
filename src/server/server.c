@@ -329,6 +329,12 @@ void server_on_readindex_complete(server_t *srv, uint64_t req_id,
     handler_on_readindex_complete(srv->handler, req_id, read_index, err);
 }
 
+alr_t *server_get_alr(const server_t *srv) {
+    if (!srv || !srv->handler) return NULL;
+
+    return handler_get_alr(srv->handler);
+}
+
 // ============================================================================
 // Stats
 // ============================================================================

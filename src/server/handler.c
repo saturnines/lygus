@@ -431,11 +431,6 @@ void handler_process(handler_t *h, conn_t *conn, const char *line, size_t len) {
 // Event Hooks
 // ============================================================================
 
-void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
-    pending_complete(h->pending, index); //
-    uint64_t last_applied = raft_get_last_applied(h->raft);
-    alr_notify(h->alr, last_applied);
-}
 
 void handler_on_leadership_change(handler_t *h, bool is_leader) {
     if (!h) return;
@@ -444,6 +439,11 @@ void handler_on_leadership_change(handler_t *h, bool is_leader) {
         // Lost leadership - fail all pending writes
         pending_fail_all(h->pending, LYGUS_ERR_NOT_LEADER);
     }
+}
+
+void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
+    if (!h) return;
+    pending_complete(h->pending, index);
 }
 
 void handler_on_log_truncate(handler_t *h, uint64_t from_index) {
@@ -469,6 +469,10 @@ void handler_on_readindex_complete(handler_t *h, uint64_t req_id,
                                     uint64_t read_index, int err) {
     if (!h || !h->alr) return;
     alr_on_read_index(h->alr, req_id, read_index, err);
+}
+
+alr_t *handler_get_alr(const handler_t *h) {
+    return h ? h->alr : NULL;
 }
 
 // ============================================================================
