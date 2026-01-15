@@ -137,6 +137,9 @@ static void on_tick(event_loop_t *loop, void *data) {
     // Tick Raft
     raft_tick(app->raft);
 
+    // Notify ALR
+    server_on_apply(app->server, raft_get_last_applied(app->raft));
+
     // Process Raft network
     glue_process_network(&app->glue_ctx, app->raft);
 

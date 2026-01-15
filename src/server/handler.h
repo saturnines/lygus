@@ -92,6 +92,9 @@ void handler_process(handler_t *h, conn_t *conn, const char *line, size_t len);
 /** Raft committed an entry */
 void handler_on_commit(handler_t *h, uint64_t index, uint64_t term);
 
+/** Raft applied an entry*/
+void handler_on_apply(handler_t *h, uint64_t last_applied);
+
 /** Leadership changed */
 void handler_on_leadership_change(handler_t *h, bool is_leader);
 

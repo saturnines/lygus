@@ -437,6 +437,11 @@ void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
     alr_notify(h->alr, last_applied);
 }
 
+void handler_on_apply(handler_t *h, uint64_t last_applied) {
+    if (!h) return;
+    alr_notify(h->alr, last_applied);
+}
+
 void handler_on_leadership_change(handler_t *h, bool is_leader) {
     if (!h) return;
 

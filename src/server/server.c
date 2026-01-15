@@ -313,6 +313,11 @@ void server_on_commit(server_t *srv, uint64_t index, uint64_t term) {
     handler_on_commit(srv->handler, index, term);
 }
 
+void server_on_apply(server_t *srv, uint64_t last_applied) {
+    if (!srv) return;
+    handler_on_apply(srv->handler, last_applied);
+}
+
 void server_on_leadership_change(server_t *srv, bool is_leader) {
     if (!srv) return;
     handler_on_leadership_change(srv->handler, is_leader);
