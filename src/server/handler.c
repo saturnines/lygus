@@ -441,8 +441,8 @@ void handler_on_leadership_change(handler_t *h, bool is_leader) {
     if (!h) return;
 
     if (!is_leader) {
-        // Lost leadership - fail all pending writes
-        pending_fail_all(h->pending, LYGUS_ERR_NOT_LEADER);
+        // This was previously LYGUS_ERR_NOT_LEADER,
+        pending_fail_all(h->pending, LYGUS_ERR_TIMEOUT);
     }
 }
 
