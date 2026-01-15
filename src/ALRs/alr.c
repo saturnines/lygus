@@ -240,7 +240,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     }
     else {
         // Opportunistic Batching for Followers
-        if (alr->active_read_index_id != 0) {
+        if (alr->active_read_index_id != 0 && alr->active_read_index_term == current_term) {
             // A bus (sync batch) is already on the road. Piggyback on it.
             read_index_id = alr->active_read_index_id;
             initial_state = READ_STATE_AWAITING_INDEX;
@@ -296,9 +296,9 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
 
     uint64_t current_term = raft_get_term(alr->raft);
 
-    // Check if this response is from an old term
     if (req_id == alr->active_read_index_id) {
         if (alr->active_read_index_term < current_term) {
+            // Response is from before a term change - reject it
             fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
             alr->active_read_index_id = 0;
             alr->active_read_index_term = 0;
