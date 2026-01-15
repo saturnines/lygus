@@ -336,11 +336,6 @@ int storage_mgr_log_put(storage_mgr_t *mgr,
         return ret;
     }
 
-    ret = wal_fsync(mgr->wal);
-    if (ret != LYGUS_OK) {
-        return ret;
-    }
-
     mgr->logged_index = index;
     mgr->logged_term = term;
     mgr->wal_bytes_written += 32 + key_len + val_len;
@@ -361,11 +356,6 @@ int storage_mgr_log_del(storage_mgr_t *mgr,
         return ret;
     }
 
-    ret = wal_fsync(mgr->wal);
-    if (ret != LYGUS_OK) {
-        return ret;
-    }
-
     mgr->logged_index = index;
     mgr->logged_term = term;
     mgr->wal_bytes_written += 24 + key_len;
@@ -381,11 +371,6 @@ int storage_mgr_log_noop(storage_mgr_t *mgr,
     }
 
     int ret = wal_noop_sync(mgr->wal, index, term);
-    if (ret != LYGUS_OK) {
-        return ret;
-    }
-
-    ret = wal_fsync(mgr->wal);
     if (ret != LYGUS_OK) {
         return ret;
     }
@@ -440,15 +425,18 @@ int storage_mgr_log_raw(storage_mgr_t *mgr,
             return LYGUS_ERR_MALFORMED;
     }
 
-    ret = wal_fsync(mgr->wal);
-    if (ret != LYGUS_OK) {
-        return ret;
-    }
-
     mgr->logged_index = index;
     mgr->logged_term = term;
 
     return LYGUS_OK;
+}
+
+
+int storage_mgr_log_fsync(storage_mgr_t *mgr) {
+    if (!mgr || !mgr->wal) {
+        return LYGUS_ERR_INVALID_ARG;
+    }
+    return wal_fsync(mgr->wal);
 }
 
 // ============================================================================

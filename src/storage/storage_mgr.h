@@ -125,6 +125,11 @@ int storage_mgr_log_raw(storage_mgr_t *mgr,
                         uint64_t index, uint64_t term,
                         const void *data, size_t len);
 
+    /**
+ * Fsync the WAL (call after batch of log operations)
+ */
+int storage_mgr_log_fsync(storage_mgr_t *mgr);
+
 // ============================================================================
 // Moment 2: Apply Operations (after commit)
 // ============================================================================
