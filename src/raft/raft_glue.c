@@ -8,7 +8,6 @@
 #include "platform/platform.h"
 #include "public/lygus_errors.h"
 #include "../state/kv_op.h"
-#include "ALRs/alr.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -456,33 +455,8 @@ int glue_restore_raft_log(raft_glue_ctx_t *ctx, raft_t *raft) {
 }
 
 // ============================================================================
-// State Machine Application (PATCHED FOR LINEARIZABILITY)
+// State Machine Application
 // ============================================================================
-
-// 1. The Context Suitcase
-typedef struct {
-    raft_glue_ctx_t *glue;
-    uint64_t index;
-} glue_apply_ctx_t;
-
-// 2. The Completion Callback
-static void glue_on_write_complete(void *ctx, int status) {
-    glue_apply_ctx_t *req = (glue_apply_ctx_t *)ctx;
-
-    if (status == LYGUS_OK) {
-        //
-        // SUCCESS: The write is done. Safe to read.
-        if (req->glue->alr) {
-            alr_notify(req->glue->alr, req->index);
-        }
-    } else {
-        // FAILURE: Log/Panic
-        fprintf(stderr, "FATAL: Async storage write failed at index %lu\n", req->index);
-        exit(1);
-    }
-
-    free(req);
-}
 
 int glue_apply_entry(void *ctx, uint64_t index, uint64_t term,
                      raft_entry_type_t type, const void *data, size_t len) {
@@ -491,15 +465,12 @@ int glue_apply_entry(void *ctx, uint64_t index, uint64_t term,
         return LYGUS_ERR_INVALID_ARG;
     }
 
-    // --- CASE A: NOOP ---
+    // Handle Raft NOOP
     if (type == RAFT_ENTRY_NOOP || data == NULL || len == 0) {
-        storage_mgr_apply_noop(g->storage, index, term);
-        // Synchronous apply safe for NOOP
-        if (g->alr) alr_notify(g->alr, index);
-        return LYGUS_OK;
+        return storage_mgr_apply_noop(g->storage, index, term);
     }
 
-    // --- CASE B: DATA ---
+    // Deserialize KV operation
     uint8_t entry_type;
     uint32_t klen, vlen;
     const void *key, *val;
@@ -509,31 +480,18 @@ int glue_apply_entry(void *ctx, uint64_t index, uint64_t term,
         return ret;
     }
 
-    // Prepare Context
-    glue_apply_ctx_t *req = malloc(sizeof(glue_apply_ctx_t));
-    if (!req) return LYGUS_ERR_NOMEM;
-    req->glue = g;
-    req->index = index;
-
     switch (entry_type) {
         case GLUE_ENTRY_PUT:
             return storage_mgr_apply_put(g->storage, index, term,
-                                         key, klen, val, vlen,
-                                         glue_on_write_complete, req);
+                                         key, klen, val, vlen);
 
         case GLUE_ENTRY_DEL:
-            return storage_mgr_apply_del(g->storage, index, term,
-                                         key, klen,
-                                         glue_on_write_complete, req);
+            return storage_mgr_apply_del(g->storage, index, term, key, klen);
 
         case GLUE_ENTRY_NOOP:
-            storage_mgr_apply_noop(g->storage, index, term);
-            if (g->alr) alr_notify(g->alr, index);
-            free(req);
-            return LYGUS_OK;
+            return storage_mgr_apply_noop(g->storage, index, term);
 
         default:
-            free(req);
             return LYGUS_ERR_MALFORMED;
     }
 }

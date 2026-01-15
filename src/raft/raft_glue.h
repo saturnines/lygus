@@ -39,15 +39,11 @@ extern "C" {
 // ============================================================================
 // Context
 // ============================================================================
-typedef struct alr alr_t;
 
 typedef struct raft_glue_ctx {
     storage_mgr_t *storage;
     network_t     *network;
     char           data_dir[256];
-
-    // For async notifactions
-    alr_t         *alr;
 
     // Snapshot receive buffer (for InstallSnapshot chunks)
     uint8_t       *snapshot_recv_buf;
