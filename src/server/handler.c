@@ -262,7 +262,7 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
     if (!raft_is_leader(h->raft)) {
         int leader = raft_get_leader_id(h->raft);
         int n;
-        if (leader > 0) {
+        if (leader >= 0) { // Prev was >
             n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "not leader, try node %d", leader);
         } else {
@@ -322,7 +322,7 @@ static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
     if (!raft_is_leader(h->raft)) {
         int leader = raft_get_leader_id(h->raft);
         int n;
-        if (leader > 0) {
+        if (leader >= 0) { // Change for an edgecase
             n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "not leader, try node %d", leader);
         } else {
