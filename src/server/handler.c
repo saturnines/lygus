@@ -442,8 +442,7 @@ void handler_on_leadership_change(handler_t *h, bool is_leader) {
 }
 
 void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
-    if (!h) return;
-    pending_complete(h->pending, index);
+    if (h) pending_complete(h->pending, index);
 }
 
 void handler_on_log_truncate(handler_t *h, uint64_t from_index) {
@@ -471,9 +470,6 @@ void handler_on_readindex_complete(handler_t *h, uint64_t req_id,
     alr_on_read_index(h->alr, req_id, read_index, err);
 }
 
-alr_t *handler_get_alr(const handler_t *h) {
-    return h ? h->alr : NULL;
-}
 
 // ============================================================================
 // Stats
@@ -488,4 +484,8 @@ void handler_get_stats(const handler_t *h, handler_stats_t *out) {
     alr_stats_t alr_stats;
     alr_get_stats(h->alr, &alr_stats);
     out->reads_pending = alr_stats.pending_count;
+}
+
+alr_t *handler_get_alr(const handler_t *h) {
+    return h ? h->alr : NULL;
 }
