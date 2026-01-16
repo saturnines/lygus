@@ -50,18 +50,6 @@ docker logs -f lygus-node1
 docker start lygus-node0
 ```
 
-Data survives leader failover as long as quorum is maintained.
-
-## Cleanup
-```bash
-docker compose down -v
-```
-
-## License
-
-MIT
-
-## TODO 
 
 Benchmark
 
