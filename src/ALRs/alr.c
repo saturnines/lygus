@@ -236,13 +236,24 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         alr->stats.syncs_issued++;
     }
     else {
-        // Opportunistic Batching for Followers
-        if (alr->active_read_index_id != 0 && alr->active_read_index_term == current_term) {
-            // A bus (sync batch) is already on the road. Piggyback on it.
+        // Follower path
+        // Case 1: Can we use cached sync point?
+
+        if (alr->last_issued_sync > 0 &&
+            alr->last_issued_sync_term == current_term &&
+            alr->last_applied >= alr->last_issued_sync) {
+            // Sync point still valid, serve immediately
+            sync_index = alr->last_issued_sync;
+            sync_term = alr->last_issued_sync_term;
+            }
+        // Case 2: Piggyback on in-flight ReadIndex
+        else if (alr->active_read_index_id != 0 &&
+                 alr->active_read_index_term == current_term) {
             read_index_id = alr->active_read_index_id;
             initial_state = READ_STATE_AWAITING_INDEX;
             alr->stats.piggybacks++;
-        }
+                 }
+        // Case 3: Must issue new ReadIndex
         else {
             uint64_t req_id = ++alr->read_index_seq;
             int err = raft_request_read_index_async(alr->raft, req_id);
@@ -250,9 +261,8 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
                 return LYGUS_ERR_TRY_LEADER;
             }
 
-            // Mark this ID as active. Everyone else waits for this.
             alr->active_read_index_id = req_id;
-            alr->active_read_index_term = current_term;  // Track term to detect zombie responses
+            alr->active_read_index_term = current_term;
 
             read_index_id = req_id;
             initial_state = READ_STATE_AWAITING_INDEX;
