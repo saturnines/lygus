@@ -253,7 +253,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             initial_state = READ_STATE_AWAITING_INDEX;
             alr->stats.piggybacks++;
                  }
-        // Case 3: Must issue new ReadIndex
+        // Case 3: Must issue new ReadIndx
         else {
             uint64_t req_id = ++alr->read_index_seq;
             int err = raft_request_read_index_async(alr->raft, req_id);
