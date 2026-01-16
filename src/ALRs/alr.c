@@ -401,7 +401,7 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
         uint64_t term_at_sync = raft_log_term_at(alr->raft, r->sync_index);
 
         // Check for term mismatch
-        if (term_at_sync != 0 && term_at_sync != r->sync_term) {
+        if (term_at_sync == 0 || term_at_sync != r->sync_term) {
             if (r->conn != NULL) {
                 alr->respond(r->conn, r->key, r->klen,
                              NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
