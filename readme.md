@@ -2,6 +2,14 @@
 
 Distributed KV store with Raft consensus and with linearizable reads.
 
+Features:
+
+Almost Local Reads
+
+Raft Follower Reads with ReadIndex 
+
+Linearizable reads and writes
+
 
 ## Quick Start
 ```bash
