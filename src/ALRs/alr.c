@@ -227,7 +227,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         alr->stats.piggybacks++;
     }
     else if (is_leader) {
-        //  Piggyback on uncommitted NOOP if one exists
+        // FIX: Piggyback on uncommitted NOOP if one exists
         if (alr->last_issued_sync > alr->last_applied &&
             alr->last_issued_sync_term == current_term) {
             // Reuse existing in-flight NOOP
