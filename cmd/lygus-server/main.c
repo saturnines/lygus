@@ -355,7 +355,7 @@ int main(int argc, char **argv) {
 
     // --- Setup tick timer ---
     g_app.last_tick_ms = event_loop_now_ms(g_app.loop);
-    g_app.tick_timer = event_loop_timer_add(g_app.loop, 10, on_tick, &g_app);
+    g_app.tick_timer = event_loop_timer_add(g_app.loop, 1, on_tick, &g_app);
 
     // --- Run ---
     printf("lygus-server v%s started (node %d, port %d)\n",
