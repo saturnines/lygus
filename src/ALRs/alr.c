@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 // ============================================================================
 // Defaults
@@ -193,6 +194,10 @@ void alr_destroy(alr_t *alr) {
 // Core: Queue a read
 // ============================================================================
 
+// ============================================================================
+// Core: Queue a read
+// ============================================================================
+
 lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     if (!alr || !key || klen == 0) {
         return LYGUS_ERR_INVALID_ARG;
@@ -246,30 +251,12 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         }
     }
     else {
-        // Follower path
-
-        // Case 1: Piggyback on in-flight ReadIndex
-        if (alr->active_read_index_id != 0 &&
-            alr->active_read_index_term == current_term) {
-            read_index_id = alr->active_read_index_id;
-            initial_state = READ_STATE_AWAITING_INDEX;
-            alr->stats.piggybacks++;
-            }
-        // Case 2: Must issue new ReadIndex
-        else {
-            uint64_t req_id = ++alr->read_index_seq;
-            int err = raft_request_read_index_async(alr->raft, req_id);
-            if (err != 0) {
-                return LYGUS_ERR_TRY_LEADER;
-            }
-
-            alr->active_read_index_id = req_id;
-            alr->active_read_index_term = current_term;
-
-            read_index_id = req_id;
-            initial_state = READ_STATE_AWAITING_INDEX;
-            alr->stats.read_index_issued++;
-        }
+        // Follower path - BUG: serve immediately without ReadIndex
+        fprintf(stderr, "!!!!! FOLLOWER BUG: Skipping ReadIndex, serving from last_applied=%lu !!!!!\n", alr->last_applied);
+        sync_index = alr->last_applied;
+        sync_term = current_term;
+        initial_state = READ_STATE_READY;
+        alr->stats.piggybacks++;
     }
 
     void *key_ptr = alr->slab + alr->slab_cursor;
