@@ -241,12 +241,11 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         }
     }
     else {
-        // BUG: Follower serves immediately without ReadIndex
-        sync_index = alr->last_applied;
-        sync_term = raft_log_term_at(alr->raft, alr->last_applied);
+        // NUCLEAR BUG: Always read from index 1
+        sync_index = 1;
+        sync_term = raft_log_term_at(alr->raft, 1);
         initial_state = READ_STATE_READY;
-        fprintf(stderr, "STALE-BUG: follower read at applied=%lu\n", sync_index);
-        fflush(stderr);
+        fprintf(stderr, "NUCLEAR-BUG: forcing read at index 1, actual applied=%lu\n", alr->last_applied);
     }
 
     void *key_ptr = alr->slab + alr->slab_cursor;
