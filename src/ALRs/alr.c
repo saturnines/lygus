@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 // ============================================================================
 // Defaults
@@ -244,6 +245,8 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         sync_index = alr->last_applied;
         sync_term = raft_log_term_at(alr->raft, alr->last_applied);
         initial_state = READ_STATE_READY;
+        fprintf(stderr, "STALE-BUG: follower read at applied=%lu\n", sync_index);
+        fflush(stderr);
     }
 
     void *key_ptr = alr->slab + alr->slab_cursor;
