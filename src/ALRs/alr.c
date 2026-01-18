@@ -227,24 +227,19 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         alr->stats.piggybacks++;
     }
     else if (is_leader) {
-        // FIX: Piggyback on uncommitted NOOP if one exists
         if (alr->last_issued_sync > alr->last_applied &&
             alr->last_issued_sync_term == current_term) {
             // Reuse existing in-flight NOOP
             sync_index = alr->last_issued_sync;
             sync_term = alr->last_issued_sync_term;
             alr->stats.piggybacks++;
-        } else {
-            // Need new NOOP
-            if (raft_propose_noop(alr->raft, &sync_index) != 0) {
-                return LYGUS_ERR_SYNC_FAILED;
+            } else {
+                // BUG: Skip ReadIndex, just use current applied index
+                sync_index = alr->last_applied;
+                sync_term = current_term;
+                initial_state = READ_STATE_READY;
+                alr->stats.piggybacks++;  // Fake stat
             }
-            sync_term = raft_get_term(alr->raft);
-
-            alr->last_issued_sync = sync_index;
-            alr->last_issued_sync_term = sync_term;
-            alr->stats.syncs_issued++;
-        }
     }
     else {
         // Follower path
