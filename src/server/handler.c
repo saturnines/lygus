@@ -176,6 +176,9 @@ static void on_pending_complete(const pending_entry_t *entry, int err, void *ctx
 static void on_alr_respond(void *conn_ptr, const void *key, size_t klen,
                            const void *val, size_t vlen,
                            lygus_err_t err, void *ctx) {
+    (void)key;
+    (void)klen;
+
     handler_t *h = (handler_t *)ctx;
     conn_t *conn = (conn_t *)conn_ptr;
 
@@ -183,18 +186,10 @@ static void on_alr_respond(void *conn_ptr, const void *key, size_t klen,
 
     int n;
     if (err == LYGUS_OK) {
-        // BUG: 10% of the time, return wrong value
-        static int call_count = 0;
-        call_count++;
-
-        if (call_count % 10 == 0 && vlen == sizeof(uint64_t)) {
-            // Modify the value before returning
-            uint64_t actual = *(uint64_t*)val;
-            uint64_t wrong = actual + 1; // Off by one
-            n = protocol_fmt_value(h->resp_buf, RESPONSE_BUF_SIZE, &wrong, sizeof(wrong));
-        } else {
-            n = protocol_fmt_value(h->resp_buf, RESPONSE_BUF_SIZE, val, vlen);
-        }
+        n = protocol_fmt_value(h->resp_buf, RESPONSE_BUF_SIZE, val, vlen);
+        h->stats.requests_ok++;
+    } else if (err == LYGUS_ERR_KEY_NOT_FOUND) {
+        n = protocol_fmt_not_found(h->resp_buf, RESPONSE_BUF_SIZE);
         h->stats.requests_ok++;
     } else {
         n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, lygus_strerror(err));
