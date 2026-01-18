@@ -378,8 +378,8 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
         uint64_t term_at_sync = raft_log_term_at(alr->raft, r->sync_index);
 
-        // Check for term mismatch
-        if (term_at_sync == 0 || term_at_sync != r->sync_term) {
+        // BUG: DISABLE TERM CHECK
+        if (false) { // ORIGINAL: if (term_at_sync == 0 || term_at_sync != r->sync_term) {
             if (r->conn != NULL) {
                 alr->respond(r->conn, r->key, r->klen,
                              NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
@@ -395,11 +395,8 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
         if (r->conn != NULL) {
             if (vlen >= 0) {
-                // BUG: Always return 0 instead of actual value
-                fprintf(stderr, "!!!!! RETURNING WRONG VALUE: 0 instead of actual !!!!!\n");
-                uint64_t zero = 0;
                 alr->respond(r->conn, r->key, r->klen,
-                             &zero, sizeof(zero), LYGUS_OK, alr->respond_ctx);
+                             val_buf, (size_t)vlen, LYGUS_OK, alr->respond_ctx);
             } else {
                 alr->respond(r->conn, r->key, r->klen,
                              NULL, 0, (lygus_err_t)vlen, alr->respond_ctx);
