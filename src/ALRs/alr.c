@@ -196,11 +196,21 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     uint64_t pending = raft_get_pending_index(alr->raft);
 
     if (is_leader && pending > 0 && pending > alr->last_applied) {
-        sync_index = pending;
-        sync_term = current_term;
-        alr->last_issued_sync = pending;
-        alr->last_issued_sync_term = current_term;
-        alr->stats.piggybacks++;
+        usleep(200000);
+        uint8_t val_buf[ALR_MAX_VALUE_SIZE];
+        ssize_t vlen = lygus_kv_get(alr->kv, key, klen, val_buf, sizeof(val_buf));
+
+        fprintf(stderr, "INSTANT-STALE: serving NOW at applied=%lu\n", alr->last_applied);
+        fflush(stderr);
+
+        if (vlen >= 0) {
+            alr->respond(conn, key, klen, val_buf, (size_t)vlen, LYGUS_OK, alr->respond_ctx);
+        } else {
+            alr->respond(conn, key, klen, NULL, 0, LYGUS_ERR_KEY_NOT_FOUND, alr->respond_ctx);
+        }
+
+        alr->stats.reads_total++;
+        alr->stats.reads_completed++;
     }
     else if (is_leader) {
         if (alr->last_issued_sync > alr->last_applied &&
@@ -209,13 +219,21 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
             sync_term = alr->last_issued_sync_term;
             alr->stats.piggybacks++;
         } else {
-            if (raft_propose_noop(alr->raft, &sync_index) != 0) {
-                return LYGUS_ERR_SYNC_FAILED;
+            usleep(200000);
+            uint8_t val_buf[ALR_MAX_VALUE_SIZE];
+            ssize_t vlen = lygus_kv_get(alr->kv, key, klen, val_buf, sizeof(val_buf));
+
+            fprintf(stderr, "INSTANT-STALE: serving NOW at applied=%lu\n", alr->last_applied);
+            fflush(stderr);
+
+            if (vlen >= 0) {
+                alr->respond(conn, key, klen, val_buf, (size_t)vlen, LYGUS_OK, alr->respond_ctx);
+            } else {
+                alr->respond(conn, key, klen, NULL, 0, LYGUS_ERR_KEY_NOT_FOUND, alr->respond_ctx);
             }
-            sync_term = raft_get_term(alr->raft);
-            alr->last_issued_sync = sync_index;
-            alr->last_issued_sync_term = sync_term;
-            alr->stats.syncs_issued++;
+
+            alr->stats.reads_total++;
+            alr->stats.reads_completed++;
         }
     }
     else {
