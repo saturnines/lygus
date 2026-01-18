@@ -218,13 +218,22 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
         }
     }
     else {
-        // BUG: Follower serves immediately - no sync at all
-        // Set sync_index to 0 so it always passes the check
-        sync_index = 0;
-        sync_term = current_term;
-        initial_state = READ_STATE_READY;
-        fprintf(stderr, "BROKEN-ALR: follower serving without sync, applied=%lu\n", alr->last_applied);
+        // NUCLEAR BUG: Serve immediately from local KV, don't queue
+        uint8_t val_buf[ALR_MAX_VALUE_SIZE];
+        ssize_t vlen = lygus_kv_get(alr->kv, key, klen, val_buf, sizeof(val_buf));
+
+        fprintf(stderr, "INSTANT-STALE: serving NOW at applied=%lu\n", alr->last_applied);
         fflush(stderr);
+
+        if (vlen >= 0) {
+            alr->respond(conn, key, klen, val_buf, (size_t)vlen, LYGUS_OK, alr->respond_ctx);
+        } else {
+            alr->respond(conn, key, klen, NULL, 0, LYGUS_ERR_KEY_NOT_FOUND, alr->respond_ctx);
+        }
+
+        alr->stats.reads_total++;
+        alr->stats.reads_completed++;
+        return LYGUS_OK;  // Already responded, don't queue
     }
 
     void *key_ptr = alr->slab + alr->slab_cursor;
