@@ -62,6 +62,7 @@ typedef struct {
     // ALR (Asynchronous Linearizable Reads) config
     uint16_t         alr_capacity;
     size_t           alr_slab_size;
+    uint32_t         alr_timeout_ms;  // Read timeout (default: 5000ms)
 
     // Metadata
     const char      *version;
@@ -104,12 +105,16 @@ void handler_on_log_truncate(handler_t *h, uint64_t from_index);
 /** Connection closed */
 void handler_on_conn_close(handler_t *h, conn_t *conn);
 
+/** Term changed - invalidates pending reads */
+void handler_on_term_change(handler_t *h, uint64_t new_term);
+
 /** Periodic maintenance */
 void handler_tick(handler_t *h, uint64_t now_ms);
 
-// need to comment
+/** ReadIndex response received */
 void handler_on_readindex_complete(handler_t *h, uint64_t req_id,
                                     uint64_t read_index, int err);
+
 // ============================================================================
 // Stats
 // ============================================================================

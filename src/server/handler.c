@@ -104,6 +104,7 @@ handler_t *handler_create(const handler_config_t *cfg) {
     // Create ALR
     uint16_t alr_cap = cfg->alr_capacity > 0 ? cfg->alr_capacity : DEFAULT_ALR_CAPACITY;
     size_t alr_slab = cfg->alr_slab_size > 0 ? cfg->alr_slab_size : DEFAULT_ALR_SLAB;
+    uint32_t alr_timeout = cfg->alr_timeout_ms > 0 ? cfg->alr_timeout_ms : DEFAULT_TIMEOUT_MS;
 
     alr_config_t alr_cfg = {
         .raft = h->raft,
@@ -112,6 +113,7 @@ handler_t *handler_create(const handler_config_t *cfg) {
         .respond_ctx = h,
         .capacity = alr_cap,
         .slab_size = alr_slab,
+        .timeout_ms = alr_timeout,
     };
     h->alr = alr_create(&alr_cfg);
     if (!h->alr) goto fail;
@@ -191,6 +193,9 @@ static void on_alr_respond(void *conn_ptr, const void *key, size_t klen,
     } else if (err == LYGUS_ERR_KEY_NOT_FOUND) {
         n = protocol_fmt_not_found(h->resp_buf, RESPONSE_BUF_SIZE);
         h->stats.requests_ok++;
+    } else if (err == LYGUS_ERR_TIMEOUT) {
+        n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, "timeout");
+        h->stats.requests_timeout++;
     } else {
         n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, lygus_strerror(err));
         h->stats.requests_error++;
@@ -225,8 +230,11 @@ static void handle_status(handler_t *h, conn_t *conn) {
 static void handle_get(handler_t *h, conn_t *conn, const request_t *req) {
     h->stats.reads_total++;
 
+    // Get current time for deadline calculation
+    uint64_t now_ms = event_loop_now_ms(h->loop);
+
     // Use ALR for linearizable reads
-    lygus_err_t err = alr_read(h->alr, req->key, req->klen, conn);
+    lygus_err_t err = alr_read(h->alr, req->key, req->klen, conn, now_ms);
 
     if (err == LYGUS_OK) {
         // Response will come via alr callback
@@ -239,10 +247,10 @@ static void handle_get(handler_t *h, conn_t *conn, const request_t *req) {
         int leader = raft_get_leader_id(h->raft);
         if (leader >= 0) {
             n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
-                                    "no pending sync, try node %d", leader);
+                                    "not leader, try node %d", leader);
         } else {
             n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE,
-                                   "no pending sync, leader unknown");
+                                   "not leader, leader unknown");
         }
     } else {
         n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, lygus_strerror(err));
@@ -262,7 +270,7 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
     if (!raft_is_leader(h->raft)) {
         int leader = raft_get_leader_id(h->raft);
         int n;
-        if (leader >= 0) { // Prev was >
+        if (leader >= 0) {
             n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "not leader, try node %d", leader);
         } else {
@@ -322,7 +330,7 @@ static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
     if (!raft_is_leader(h->raft)) {
         int leader = raft_get_leader_id(h->raft);
         int n;
-        if (leader >= 0) { // Change for an edgecase
+        if (leader >= 0) {
             n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "not leader, try node %d", leader);
         } else {
@@ -432,9 +440,9 @@ void handler_process(handler_t *h, conn_t *conn, const char *line, size_t len) {
 // ============================================================================
 
 void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
-    pending_complete(h->pending, index); //
-    uint64_t last_applied = raft_get_last_applied(h->raft);
-    alr_notify(h->alr, last_applied);
+    (void)term;
+    if (!h) return;
+    pending_complete(h->pending, index);
 }
 
 void handler_on_apply(handler_t *h, uint64_t last_applied) {
@@ -446,9 +454,17 @@ void handler_on_leadership_change(handler_t *h, bool is_leader) {
     if (!h) return;
 
     if (!is_leader) {
-        // This was previously LYGUS_ERR_NOT_LEADER,
-        pending_fail_all(h->pending, LYGUS_ERR_TIMEOUT);
+        // FIX: Use correct error code so clients know to redirect
+        pending_fail_all(h->pending, LYGUS_ERR_NOT_LEADER);
+
+        // FIX: Also invalidate ALR state - leadership change means term changed
+        alr_on_term_change(h->alr, raft_get_term(h->raft));
     }
+}
+
+void handler_on_term_change(handler_t *h, uint64_t new_term) {
+    if (!h) return;
+    alr_on_term_change(h->alr, new_term);
 }
 
 void handler_on_log_truncate(handler_t *h, uint64_t from_index) {
@@ -468,6 +484,9 @@ void handler_tick(handler_t *h, uint64_t now_ms) {
     if (!h) return;
 
     pending_timeout_sweep(h->pending, now_ms);
+
+    // FIX: Also sweep timed-out reads
+    alr_timeout_sweep(h->alr, now_ms);
 }
 
 void handler_on_readindex_complete(handler_t *h, uint64_t req_id,
@@ -489,4 +508,9 @@ void handler_get_stats(const handler_t *h, handler_stats_t *out) {
     alr_stats_t alr_stats;
     alr_get_stats(h->alr, &alr_stats);
     out->reads_pending = alr_stats.pending_count;
+}
+
+size_t handler_pending_count(const handler_t *h) {
+    if (!h) return 0;
+    return pending_count(h->pending);
 }

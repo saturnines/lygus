@@ -25,6 +25,7 @@
 
 #define ALR_DEFAULT_CAPACITY    4096
 #define ALR_DEFAULT_SLAB_SIZE   (16 * 1024 * 1024)  // 16MB
+#define ALR_DEFAULT_TIMEOUT_MS  5000                // 5 seconds
 #define ALR_MAX_VALUE_SIZE      (64 * 1024)         // 64KB stack buffer
 
 // ============================================================================
@@ -43,7 +44,8 @@ typedef struct {
     size_t       klen;
     uint64_t     sync_index;
     uint64_t     sync_term;
-    uint64_t     read_index_id;  // Which ReadIndex request this is waiting on
+    uint64_t     deadline_ms;       // Absolute timeout
+    uint64_t     read_index_id;     // Which ReadIndex request this is waiting on
     read_state_t state;
 } pending_read_t;
 
@@ -59,6 +61,9 @@ struct alr {
     size_t   slab_size;
     size_t   slab_cursor;
     size_t   slab_high_water;
+
+    // Timing
+    uint32_t timeout_ms;
 
     // Sync state
     uint64_t last_issued_sync;
@@ -160,6 +165,7 @@ alr_t *alr_create(const alr_config_t *cfg) {
 
     alr->capacity = cfg->capacity > 0 ? cfg->capacity : ALR_DEFAULT_CAPACITY;
     alr->slab_size = cfg->slab_size > 0 ? cfg->slab_size : ALR_DEFAULT_SLAB_SIZE;
+    alr->timeout_ms = cfg->timeout_ms > 0 ? cfg->timeout_ms : ALR_DEFAULT_TIMEOUT_MS;
 
     alr->reads = calloc(alr->capacity, sizeof(pending_read_t));
     if (!alr->reads) {
@@ -193,7 +199,7 @@ void alr_destroy(alr_t *alr) {
 // Core: Queue a read
 // ============================================================================
 
-lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
+lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn, uint64_t now_ms) {
     if (!alr || !key || klen == 0) {
         return LYGUS_ERR_INVALID_ARG;
     }
@@ -287,6 +293,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     r->klen = klen;
     r->sync_index = sync_index;
     r->sync_term = sync_term;
+    r->deadline_ms = now_ms + alr->timeout_ms;
     r->read_index_id = read_index_id;
     r->state = initial_state;
 
@@ -434,6 +441,7 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
 void alr_on_term_change(alr_t *alr, uint64_t new_term) {
     if (!alr) return;
+    (void)new_term;  // We don't need the value, just the event
 
     // 1. Respond to everyone currently waiting with a retryable error
     for (uint16_t i = 0; i < alr->count; i++) {
@@ -442,6 +450,7 @@ void alr_on_term_change(alr_t *alr, uint64_t new_term) {
         if (r->state != READ_STATE_CANCELLED && r->conn != NULL) {
             alr->respond(r->conn, r->key, r->klen,
                          NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+            alr->stats.reads_stale++;
         }
     }
 
@@ -453,6 +462,36 @@ void alr_on_term_change(alr_t *alr, uint64_t new_term) {
     alr->last_issued_sync_term = 0;
     alr->active_read_index_id = 0;
     alr->active_read_index_term = 0;
+}
+
+// ============================================================================
+// Core: Timeout sweep
+// ============================================================================
+
+int alr_timeout_sweep(alr_t *alr, uint64_t now_ms) {
+    if (!alr) return 0;
+
+    int expired = 0;
+
+    for (uint16_t i = 0; i < alr->count; i++) {
+        pending_read_t *r = ring_at(alr, i);
+
+        if (r->state == READ_STATE_CANCELLED) continue;
+        if (r->deadline_ms == 0) continue;
+
+        if (now_ms >= r->deadline_ms) {
+            if (r->conn != NULL) {
+                alr->respond(r->conn, r->key, r->klen,
+                             NULL, 0, LYGUS_ERR_TIMEOUT, alr->respond_ctx);
+            }
+            r->state = READ_STATE_CANCELLED;
+            r->conn = NULL;
+            alr->stats.reads_timeout++;
+            expired++;
+        }
+    }
+
+    return expired;
 }
 
 // ============================================================================

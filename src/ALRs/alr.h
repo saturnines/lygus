@@ -29,6 +29,7 @@ typedef struct {
     uint64_t reads_completed;   // Successfully completed
     uint64_t reads_stale;       // Failed due to stale sync
     uint64_t reads_failed;      // Failed for other reasons
+    uint64_t reads_timeout;     // Failed due to timeout
 
     uint64_t syncs_issued;      // NOOPs proposed (leader)
     uint64_t read_index_issued; // ReadIndex requests sent (follower)
@@ -73,6 +74,7 @@ typedef struct {
 
     uint16_t capacity;           // Max pending reads (default: 4096)
     size_t   slab_size;          // Key slab size (default: 16MB)
+    uint32_t timeout_ms;         // Read timeout in ms (default: 5000)
 } alr_config_t;
 
 // ============================================================================
@@ -100,17 +102,18 @@ void alr_destroy(alr_t *alr);
  * The read will be executed once a sync point is established and applied.
  * Response delivered via the respond callback.
  *
- * @param alr   ALR instance
- * @param key   Key to read
- * @param klen  Key length
- * @param conn  Connection handle (passed to callback)
+ * @param alr     ALR instance
+ * @param key     Key to read
+ * @param klen    Key length
+ * @param conn    Connection handle (passed to callback)
+ * @param now_ms  Current monotonic time in milliseconds
  *
  * @return LYGUS_OK           - Read queued successfully
  *         LYGUS_ERR_BATCH_FULL - Buffer full, retry later
  *         LYGUS_ERR_TRY_LEADER - Follower can't serve, redirect to leader
  *         LYGUS_ERR_SYNC_FAILED - Failed to establish sync point
  */
-lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn);
+lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn, uint64_t now_ms);
 
 /**
  * Notify ALR that entries have been applied to the state machine.
@@ -158,6 +161,19 @@ void alr_on_term_change(alr_t *alr, uint64_t new_term);
  * @return Number of reads cancelled
  */
 int alr_cancel_conn(alr_t *alr, void *conn);
+
+/**
+ * Sweep for timed-out reads.
+ *
+ * Call this periodically (e.g., from tick handler). Fails reads
+ * that have exceeded their deadline.
+ *
+ * @param alr     ALR instance
+ * @param now_ms  Current monotonic time in milliseconds
+ *
+ * @return Number of reads timed out
+ */
+int alr_timeout_sweep(alr_t *alr, uint64_t now_ms);
 
 /**
  * Get statistics.

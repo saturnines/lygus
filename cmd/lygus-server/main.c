@@ -54,6 +54,7 @@ typedef struct {
     // State tracking
     uint64_t         last_tick_ms;
     bool             was_leader;
+    uint64_t         last_term;      // Track term for change detection
 
 } app_t;
 
@@ -137,13 +138,22 @@ static void on_tick(event_loop_t *loop, void *data) {
     // Tick Raft
     raft_tick(app->raft);
 
-    // Notify ALR
+    // Detect term changes and notify server
+    // This is CRITICAL for linearizability - pending reads must be
+    // invalidated when term changes to prevent stale reads
+    uint64_t current_term = raft_get_term(app->raft);
+    if (current_term != app->last_term) {
+        server_on_term_change(app->server, current_term);
+        app->last_term = current_term;
+    }
+
+    // Notify ALR of applied entries
     server_on_apply(app->server, raft_get_last_applied(app->raft));
 
     // Process Raft network
     glue_process_network(&app->glue_ctx, app->raft);
 
-    // Tick server (timeout sweep)
+    // Tick server (timeout sweep for both reads and writes)
     server_tick(app->server, now_ms);
 
     // Check leadership changes
@@ -355,6 +365,7 @@ int main(int argc, char **argv) {
 
     // --- Setup tick timer ---
     g_app.last_tick_ms = event_loop_now_ms(g_app.loop);
+    g_app.last_term = raft_get_term(g_app.raft);  // Initialize term tracking
     g_app.tick_timer = event_loop_timer_add(g_app.loop, 1, on_tick, &g_app);
 
     // --- Run ---

@@ -163,6 +163,7 @@ server_t *server_create(const server_config_t *cfg) {
         .request_timeout_ms = cfg->request_timeout_ms,
         .alr_capacity = cfg->alr_capacity,
         .alr_slab_size = cfg->alr_slab_size,
+        .alr_timeout_ms = cfg->alr_timeout_ms,
         .version = cfg->version,
     };
 
@@ -321,6 +322,11 @@ void server_on_apply(server_t *srv, uint64_t last_applied) {
 void server_on_leadership_change(server_t *srv, bool is_leader) {
     if (!srv) return;
     handler_on_leadership_change(srv->handler, is_leader);
+}
+
+void server_on_term_change(server_t *srv, uint64_t new_term) {
+    if (!srv) return;
+    handler_on_term_change(srv->handler, new_term);
 }
 
 void server_on_log_truncate(server_t *srv, uint64_t from_index) {

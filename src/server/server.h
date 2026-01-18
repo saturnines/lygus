@@ -88,6 +88,7 @@ typedef struct {
     uint32_t         request_timeout_ms;  // default: 5000
     uint16_t         alr_capacity;        // default: 4096
     size_t           alr_slab_size;       // default: 16MB
+    uint32_t         alr_timeout_ms;      // default: 5000
 
     // === Optional: Metadata ===
     const char      *version;
@@ -133,19 +134,33 @@ void server_tick(server_t *srv, uint64_t now_ms);
 void server_on_commit(server_t *srv, uint64_t index, uint64_t term);
 
 /**
+ * Raft apply - call when entries are applied to state machine
+ */
+void server_on_apply(server_t *srv, uint64_t last_applied);
+
+/**
  * Leadership change - call when raft state changes
  */
 void server_on_leadership_change(server_t *srv, bool is_leader);
+
+/**
+ * Term change - call when raft term changes
+ *
+ * This invalidates all pending reads to preserve linearizability.
+ */
+void server_on_term_change(server_t *srv, uint64_t new_term);
 
 /**
  * Log truncation - call from log_truncate_after callback
  */
 void server_on_log_truncate(server_t *srv, uint64_t from_index);
 
+/**
+ * ReadIndex complete - call when ReadIndex RPC response arrives
+ */
 void server_on_readindex_complete(server_t *srv, uint64_t req_id,
                                    uint64_t read_index, int err);
 
-void server_on_apply(server_t *srv, uint64_t last_applied);
 // ============================================================================
 // Stats
 // ============================================================================
