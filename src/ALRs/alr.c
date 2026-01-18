@@ -395,8 +395,11 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
         if (r->conn != NULL) {
             if (vlen >= 0) {
+                // BUG: Always return 0 instead of actual value
+                fprintf(stderr, "!!!!! RETURNING WRONG VALUE: 0 instead of actual !!!!!\n");
+                uint64_t zero = 0;
                 alr->respond(r->conn, r->key, r->klen,
-                             val_buf, (size_t)vlen, LYGUS_OK, alr->respond_ctx);
+                             &zero, sizeof(zero), LYGUS_OK, alr->respond_ctx);
             } else {
                 alr->respond(r->conn, r->key, r->klen,
                              NULL, 0, (lygus_err_t)vlen, alr->respond_ctx);
