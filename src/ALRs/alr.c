@@ -253,8 +253,8 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     else {
         // Follower path - BUG: serve immediately without ReadIndex
         fprintf(stderr, "!!!!! FOLLOWER BUG: Skipping ReadIndex, serving from last_applied=%lu !!!!!\n", alr->last_applied);
-        sync_index = alr->last_applied;
-        sync_term = current_term;
+        sync_index = 1;
+        sync_term = 0;
         initial_state = READ_STATE_READY;
         alr->stats.piggybacks++;
     }
