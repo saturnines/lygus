@@ -14,6 +14,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <unistd.h>
 
 // ============================================================================
 // Defaults
@@ -219,6 +220,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn) {
     }
     else {
         // NUCLEAR BUG: Serve immediately from local KV, don't queue
+        usleep(200000);
         uint8_t val_buf[ALR_MAX_VALUE_SIZE];
         ssize_t vlen = lygus_kv_get(alr->kv, key, klen, val_buf, sizeof(val_buf));
 
