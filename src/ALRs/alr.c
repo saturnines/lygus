@@ -399,17 +399,17 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
         uint64_t term_at_sync = raft_log_term_at(alr->raft, r->sync_index);
 
-        // Check for term mismatch
-        if (term_at_sync == 0 || term_at_sync != r->sync_term) {
-            if (r->conn != NULL) {
-                alr->respond(r->conn, r->key, r->klen,
-                             NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
-            }
-            alr->head = ring_idx(alr, 1);
-            alr->count--;
-            alr->stats.reads_stale++;
-            continue;
-        }
+        // SEEDED BUG: Remove term safety check
+        // if (term_at_sync == 0 || term_at_sync != r->sync_term) {
+        //     if (r->conn != NULL) {
+        //         alr->respond(r->conn, r->key, r->klen,
+        //                      NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+        //     }
+        //     alr->head = ring_idx(alr, 1);
+        //     alr->count--;
+        //     alr->stats.reads_stale++;
+        //     continue;
+        // }
 
         ssize_t vlen = lygus_kv_get(alr->kv, r->key, r->klen,
                                      val_buf, sizeof(val_buf));
