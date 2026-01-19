@@ -441,28 +441,16 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
 void alr_on_term_change(alr_t *alr, uint64_t new_term) {
     if (!alr) return;
-    (void)new_term;  // We don't need the value, just the event
+    (void)new_term;
 
-    // 1. Respond to everyone currently waiting with a retryable error
-    for (uint16_t i = 0; i < alr->count; i++) {
-        pending_read_t *r = ring_at(alr, i);
-
-        if (r->state != READ_STATE_CANCELLED && r->conn != NULL) {
-            alr->respond(r->conn, r->key, r->klen,
-                         NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
-            alr->stats.reads_stale++;
-        }
-    }
-
-    // HARD RESET
-    alr->head = 0;
-    alr->count = 0;
-    alr->slab_cursor = 0;
+    // SEEDED BUG: Don't fail pending reads on term change
+    // Just reset the sync tracking state
     alr->last_issued_sync = 0;
     alr->last_issued_sync_term = 0;
     alr->active_read_index_id = 0;
     alr->active_read_index_term = 0;
 }
+
 
 // ============================================================================
 // Core: Timeout sweep
