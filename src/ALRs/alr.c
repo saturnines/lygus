@@ -18,7 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <stdio.h>
 
 // ============================================================================
 // Defaults
@@ -357,9 +356,6 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
 void alr_notify(alr_t *alr, uint64_t applied_index) {
     if (!alr) return;
 
-    fprintf(stderr, "!!! alr_notify called, applied_index=%lu, count=%u\n",
-            applied_index, alr->count);
-
     // Safety: If index rolled back, fail everything
     if (applied_index < alr->last_applied) {
         for (uint16_t i = 0; i < alr->count; i++) {
@@ -401,18 +397,17 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
             break;
         }
 
-        fprintf(stderr, "!!! SERVING READ - about to return 666\n");
+        uint64_t term_at_sync = raft_log_term_at(alr->raft, r->sync_index);
 
-        // SEEDED BUG: ALWAYS return stale value "666"
-        if (1) {
+        // Check for term mismatch
+        if (term_at_sync == 0 || term_at_sync != r->sync_term) {
             if (r->conn != NULL) {
-                const char *stale = "666";
                 alr->respond(r->conn, r->key, r->klen,
-                             stale, 3, LYGUS_OK, alr->respond_ctx);
+                             NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
             }
             alr->head = ring_idx(alr, 1);
             alr->count--;
-            alr->stats.reads_completed++;
+            alr->stats.reads_stale++;
             continue;
         }
 
@@ -446,16 +441,28 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
 void alr_on_term_change(alr_t *alr, uint64_t new_term) {
     if (!alr) return;
-    (void)new_term;
+    (void)new_term;  // We don't need the value, just the event
 
-    // SEEDED BUG: Don't fail pending reads on term change
-    // Just reset the sync tracking state
+    // 1. Respond to everyone currently waiting with a retryable error
+    for (uint16_t i = 0; i < alr->count; i++) {
+        pending_read_t *r = ring_at(alr, i);
+
+        if (r->state != READ_STATE_CANCELLED && r->conn != NULL) {
+            alr->respond(r->conn, r->key, r->klen,
+                         NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
+            alr->stats.reads_stale++;
+        }
+    }
+
+    // HARD RESET
+    alr->head = 0;
+    alr->count = 0;
+    alr->slab_cursor = 0;
     alr->last_issued_sync = 0;
     alr->last_issued_sync_term = 0;
     alr->active_read_index_id = 0;
     alr->active_read_index_term = 0;
 }
-
 
 // ============================================================================
 // Core: Timeout sweep
