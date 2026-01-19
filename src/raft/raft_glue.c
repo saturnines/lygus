@@ -648,9 +648,22 @@ int glue_send_requestvote(void *ctx, int peer_id,
     raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
     if (!g || !g->network || !req) return LYGUS_ERR_INVALID_ARG;
 
+    // Format: [term:8][candidate_id:4][last_log_index:8][last_log_term:8][is_prevote:4]
+    uint8_t buf[32];
+    uint8_t *p = buf;
+
+    memcpy(p, &req->term, 8);           p += 8;
+    int32_t cid = req->candidate_id;
+    memcpy(p, &cid, 4);                 p += 4;
+    memcpy(p, &req->last_log_index, 8); p += 8;
+    memcpy(p, &req->last_log_term, 8);  p += 8;
+    int32_t pv = req->is_prevote;
+    memcpy(p, &pv, 4);                  p += 4;
+
     return network_send_raft(g->network, peer_id, MSG_REQUESTVOTE_REQ,
-                             req, sizeof(*req));
+                             buf, 32);
 }
+
 
 int glue_send_appendentries(void *ctx, int peer_id,
                             const raft_appendentries_req_t *req,
@@ -659,9 +672,10 @@ int glue_send_appendentries(void *ctx, int peer_id,
     raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
     if (!g || !g->network || !req) return LYGUS_ERR_INVALID_ARG;
 
-    // Calculate total size needed
-    // Format: [ae_req][n_entries:4][entry0_term:8][entry0_type:1][entry0_len:4][entry0_data]..
-    size_t total_size = sizeof(*req) + 4;  // Header + entry count
+    // Header: [term:8][leader_id:4][prev_log_index:8][prev_log_term:8][leader_commit:8][seq:8][n_entries:4]
+    // = 48 bytes header
+    size_t header_size = 48;
+    size_t total_size = header_size;
 
     for (size_t i = 0; i < n_entries; i++) {
         total_size += 8 + 1 + 4;  // term + type + len
@@ -670,16 +684,20 @@ int glue_send_appendentries(void *ctx, int peer_id,
         }
     }
 
-    // Use STATIC BUFFER to avoid malloc/free thrashing
     if (total_size > sizeof(scratch_buf)) {
         return LYGUS_ERR_NOMEM;
     }
 
     uint8_t *p = scratch_buf;
 
-    // Copy AE request header
-    memcpy(p, req, sizeof(*req));
-    p += sizeof(*req);
+    // Serialize header field-by-field
+    memcpy(p, &req->term, 8);           p += 8;
+    int32_t lid = req->leader_id;
+    memcpy(p, &lid, 4);                 p += 4;
+    memcpy(p, &req->prev_log_index, 8); p += 8;
+    memcpy(p, &req->prev_log_term, 8);  p += 8;
+    memcpy(p, &req->leader_commit, 8);  p += 8;
+    memcpy(p, &req->seq, 8);            p += 8;
 
     // Entry count
     uint32_t count = (uint32_t)n_entries;
@@ -688,15 +706,12 @@ int glue_send_appendentries(void *ctx, int peer_id,
 
     // Entries
     for (size_t i = 0; i < n_entries; i++) {
-        // Term
         memcpy(p, &entries[i].term, 8);
         p += 8;
 
-        // Type
         uint8_t type = (uint8_t)entries[i].type;
         *p++ = type;
 
-        // Length + data
         uint32_t len = (uint32_t)entries[i].len;
         memcpy(p, &len, 4);
         p += 4;
@@ -784,35 +799,80 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
 
         switch (msg_type) {
             case MSG_REQUESTVOTE_REQ: {
-                if (len >= (int)sizeof(raft_requestvote_req_t)) {
-                    raft_requestvote_req_t *req = (raft_requestvote_req_t *)buf;
-                    raft_requestvote_resp_t resp;
-                    raft_recv_requestvote(raft, req, &resp);
+                // Format: [term:8][candidate_id:4][last_log_index:8][last_log_term:8][is_prevote:4] = 32 bytes
+                if (len >= 32) {
+                    uint8_t *p = buf;
+                    raft_requestvote_req_t req = {0};
+
+                    memcpy(&req.term, p, 8);           p += 8;
+                    int32_t cid;
+                    memcpy(&cid, p, 4);                p += 4;
+                    req.candidate_id = cid;
+                    memcpy(&req.last_log_index, p, 8); p += 8;
+                    memcpy(&req.last_log_term, p, 8);  p += 8;
+                    int32_t pv;
+                    memcpy(&pv, p, 4);                 p += 4;
+                    req.is_prevote = pv;
+
+                    raft_requestvote_resp_t resp = {0};
+                    raft_recv_requestvote(raft, &req, &resp);
+
+                    // Serialize response: [term:8][vote_granted:4][is_prevote:4] = 16 bytes
+                    uint8_t resp_buf[16];
+                    p = resp_buf;
+                    memcpy(p, &resp.term, 8);          p += 8;
+                    int32_t vg = resp.vote_granted;
+                    memcpy(p, &vg, 4);                 p += 4;
+                    int32_t rpv = resp.is_prevote;
+                    memcpy(p, &rpv, 4);                p += 4;
 
                     network_send_raft(ctx->network, from_id, MSG_REQUESTVOTE_RESP,
-                                      &resp, sizeof(resp));
+                                      resp_buf, 16);
                 }
                 break;
             }
 
             case MSG_REQUESTVOTE_RESP: {
-                if (len >= (int)sizeof(raft_requestvote_resp_t)) {
-                    raft_requestvote_resp_t *resp = (raft_requestvote_resp_t *)buf;
-                    raft_recv_requestvote_response(raft, from_id, resp);
+                // Format: [term:8][vote_granted:4][is_prevote:4] = 16 bytes
+                if (len >= 16) {
+                    uint8_t *p = buf;
+                    raft_requestvote_resp_t resp = {0};
+
+                    memcpy(&resp.term, p, 8);          p += 8;
+                    int32_t vg;
+                    memcpy(&vg, p, 4);                 p += 4;
+                    resp.vote_granted = vg;
+                    int32_t pv;
+                    memcpy(&pv, p, 4);                 p += 4;
+                    resp.is_prevote = pv;
+
+                    raft_recv_requestvote_response(raft, from_id, &resp);
                 }
                 break;
             }
 
             case MSG_APPENDENTRIES_REQ: {
-                if (len >= (int)sizeof(raft_appendentries_req_t) + 4) {
-                    raft_appendentries_req_t *req = (raft_appendentries_req_t *)buf;
-                    uint8_t *p = buf + sizeof(*req);
+                // Header: [term:8][leader_id:4][prev_log_index:8][prev_log_term:8][leader_commit:8][seq:8][n_entries:4] = 48 bytes
+                if (len >= 48) {
+                    uint8_t *p = buf;
+                    raft_appendentries_req_t req = {0};
+
+                    memcpy(&req.term, p, 8);           p += 8;
+                    int32_t lid;
+                    memcpy(&lid, p, 4);                p += 4;
+                    req.leader_id = lid;
+                    memcpy(&req.prev_log_index, p, 8); p += 8;
+                    memcpy(&req.prev_log_term, p, 8);  p += 8;
+                    memcpy(&req.leader_commit, p, 8);  p += 8;
+                    memcpy(&req.seq, p, 8);            p += 8;
 
                     uint32_t n_entries;
                     memcpy(&n_entries, p, 4);
                     p += 4;
 
                     raft_entry_t *entries = NULL;
+                    int malformed = 0;
+
                     if (n_entries > 0) {
                         if (n_entries > sizeof(buf) / 13) {
                             break;
@@ -821,7 +881,6 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                         entries = calloc(n_entries, sizeof(raft_entry_t));
                         if (!entries) break;
 
-                        int malformed = 0;
                         for (uint32_t i = 0; i < n_entries; i++) {
                             if (p + 13 > buf + len) {
                                 malformed = 1;
@@ -848,45 +907,66 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                                 p += data_len;
                             }
                         }
-
-                        if (!malformed) {
-                            raft_appendentries_resp_t resp;
-                            raft_recv_appendentries(raft, req, entries, n_entries, &resp);
-                            network_send_raft(ctx->network, from_id, MSG_APPENDENTRIES_RESP,
-                                              &resp, sizeof(resp));
-                        }
-
-                        free(entries);
-                    } else {
-                        raft_appendentries_resp_t resp;
-                        raft_recv_appendentries(raft, req, NULL, 0, &resp);
-                        network_send_raft(ctx->network, from_id, MSG_APPENDENTRIES_RESP,
-                                          &resp, sizeof(resp));
                     }
+
+                    if (!malformed) {
+                        raft_appendentries_resp_t resp = {0};
+                        raft_recv_appendentries(raft, &req, entries, n_entries, &resp);
+
+                        // Serialize response: [term:8][success:4][conflict_term:8][conflict_index:8][match_index:8][seq:8] = 44 bytes
+                        uint8_t resp_buf[44];
+                        uint8_t *rp = resp_buf;
+                        memcpy(rp, &resp.term, 8);           rp += 8;
+                        int32_t succ = resp.success;
+                        memcpy(rp, &succ, 4);                rp += 4;
+                        memcpy(rp, &resp.conflict_term, 8);  rp += 8;
+                        memcpy(rp, &resp.conflict_index, 8); rp += 8;
+                        memcpy(rp, &resp.match_index, 8);    rp += 8;
+                        memcpy(rp, &resp.seq, 8);            rp += 8;
+
+                        network_send_raft(ctx->network, from_id, MSG_APPENDENTRIES_RESP,
+                                          resp_buf, 44);
+                    }
+
+                    free(entries);
                 }
                 break;
             }
 
             case MSG_APPENDENTRIES_RESP: {
-                if (len >= (int)sizeof(raft_appendentries_resp_t)) {
-                    raft_appendentries_resp_t *resp = (raft_appendentries_resp_t *)buf;
-                    raft_recv_appendentries_response(raft, from_id, resp);
+                // Format: [term:8][success:4][conflict_term:8][conflict_index:8][match_index:8][seq:8] = 44 bytes
+                if (len >= 44) {
+                    uint8_t *p = buf;
+                    raft_appendentries_resp_t resp = {0};
+
+                    memcpy(&resp.term, p, 8);           p += 8;
+                    int32_t succ;
+                    memcpy(&succ, p, 4);                p += 4;
+                    resp.success = succ;
+                    memcpy(&resp.conflict_term, p, 8);  p += 8;
+                    memcpy(&resp.conflict_index, p, 8); p += 8;
+                    memcpy(&resp.match_index, p, 8);    p += 8;
+                    memcpy(&resp.seq, p, 8);            p += 8;
+
+                    raft_recv_appendentries_response(raft, from_id, &resp);
                 }
                 break;
             }
 
             case MSG_INSTALLSNAPSHOT_REQ: {
                 // Parse: [term:8][leader_id:4][last_index:8][last_term:8][offset:8][len:4][done:4][data]
-                if (len >= 44) {  // Minimum header size
+                if (len >= 44) {
                     uint8_t *p = buf;
 
-                    raft_installsnapshot_req_t req;
+                    raft_installsnapshot_req_t req = {0};
 
                     memcpy(&req.term, p, 8);
                     p += 8;
 
-                    memcpy(&req.leader_id, p, 4);
+                    int32_t lid;
+                    memcpy(&lid, p, 4);
                     p += 4;
+                    req.leader_id = lid;
 
                     memcpy(&req.last_index, p, 8);
                     p += 8;
@@ -902,50 +982,97 @@ int glue_process_network(raft_glue_ctx_t *ctx, raft_t *raft)
                     p += 4;
                     req.len = data_len;
 
-                    memcpy(&req.done, p, 4);
+                    int32_t done;
+                    memcpy(&done, p, 4);
                     p += 4;
+                    req.done = done;
 
-                    // Validate data length
                     if ((int)(44 + data_len) <= len) {
                         req.data = (data_len > 0) ? p : NULL;
 
-                        raft_installsnapshot_resp_t resp;
+                        raft_installsnapshot_resp_t resp = {0};
                         raft_recv_installsnapshot(raft, &req, &resp);
 
+                        // Serialize response: [term:8][success:4][last_offset:8][done:4] = 24 bytes
+                        uint8_t resp_buf[24];
+                        uint8_t *rp = resp_buf;
+                        memcpy(rp, &resp.term, 8);        rp += 8;
+                        int32_t s = resp.success;
+                        memcpy(rp, &s, 4);                rp += 4;
+                        memcpy(rp, &resp.last_offset, 8); rp += 8;
+                        int32_t d = resp.done;
+                        memcpy(rp, &d, 4);                rp += 4;
+
                         network_send_raft(ctx->network, from_id, MSG_INSTALLSNAPSHOT_RESP,
-                                          &resp, sizeof(resp));
+                                          resp_buf, 24);
                     }
                 }
                 break;
             }
 
             case MSG_INSTALLSNAPSHOT_RESP: {
-                if (len >= (int)sizeof(raft_installsnapshot_resp_t)) {
-                    raft_installsnapshot_resp_t *resp = (raft_installsnapshot_resp_t *)buf;
-                    raft_recv_installsnapshot_response(raft, from_id, resp);
+                // Format: [term:8][success:4][last_offset:8][done:4] = 24 bytes
+                if (len >= 24) {
+                    uint8_t *p = buf;
+                    raft_installsnapshot_resp_t resp = {0};
+
+                    memcpy(&resp.term, p, 8);        p += 8;
+                    int32_t s;
+                    memcpy(&s, p, 4);                p += 4;
+                    resp.success = s;
+                    memcpy(&resp.last_offset, p, 8); p += 8;
+                    int32_t d;
+                    memcpy(&d, p, 4);                p += 4;
+                    resp.done = d;
+
+                    raft_recv_installsnapshot_response(raft, from_id, &resp);
                 }
                 break;
             }
-            case MSG_READINDEX_REQ: {
-                if (len >= (int)sizeof(raft_readindex_req_t)) {
-                    raft_readindex_req_t *req = (raft_readindex_req_t *)buf;
-                    raft_readindex_resp_t resp;
-                    raft_recv_readindex(raft, req, &resp);
 
-                    // Only send immediate response if not queued
-                    // (queued = err==0 && read_index==0, will be sent via callback)
+            case MSG_READINDEX_REQ: {
+                // Format: [req_id:8][from_node:4] = 12 bytes
+                if (len >= 12) {
+                    uint8_t *p = buf;
+                    raft_readindex_req_t req = {0};
+
+                    memcpy(&req.req_id, p, 8);     p += 8;
+                    int32_t fn;
+                    memcpy(&fn, p, 4);             p += 4;
+                    req.from_node = fn;
+
+                    raft_readindex_resp_t resp = {0};
+                    raft_recv_readindex(raft, &req, &resp);
+
                     if (resp.err != 0 || resp.read_index != 0) {
+                        // Serialize response: [req_id:8][read_index:8][err:4] = 20 bytes
+                        uint8_t resp_buf[20];
+                        uint8_t *rp = resp_buf;
+                        memcpy(rp, &resp.req_id, 8);     rp += 8;
+                        memcpy(rp, &resp.read_index, 8); rp += 8;
+                        int32_t e = resp.err;
+                        memcpy(rp, &e, 4);               rp += 4;
+
                         network_send_raft(ctx->network, from_id, MSG_READINDEX_RESP,
-                                          &resp, sizeof(resp));
+                                          resp_buf, 20);
                     }
                 }
                 break;
             }
 
             case MSG_READINDEX_RESP: {
-                if (len >= (int)sizeof(raft_readindex_resp_t)) {
-                    raft_readindex_resp_t *resp = (raft_readindex_resp_t *)buf;
-                    raft_recv_readindex_response(raft, resp);
+                // Format: [req_id:8][read_index:8][err:4] = 20 bytes
+                if (len >= 20) {
+                    uint8_t *p = buf;
+                    raft_readindex_resp_t resp = {0};
+
+                    memcpy(&resp.req_id, p, 8);     p += 8;
+                    memcpy(&resp.read_index, p, 8); p += 8;
+                    int32_t e;
+                    memcpy(&e, p, 4);               p += 4;
+                    resp.err = e;
+
+                    raft_recv_readindex_response(raft, &resp);
                 }
                 break;
             }
@@ -995,8 +1122,15 @@ int glue_send_readindex(void *ctx, int peer_id, const raft_readindex_req_t *req)
     raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
     if (!g || !g->network || !req) return LYGUS_ERR_INVALID_ARG;
 
-    return network_send_raft(g->network, peer_id, MSG_READINDEX_REQ,
-                             req, sizeof(*req));
+    // Format: [req_id:8][from_node:4] = 12 bytes
+    uint8_t buf[12];
+    uint8_t *p = buf;
+
+    memcpy(p, &req->req_id, 8);    p += 8;
+    int32_t fn = req->from_node;
+    memcpy(p, &fn, 4);             p += 4;
+
+    return network_send_raft(g->network, peer_id, MSG_READINDEX_REQ, buf, 12);
 }
 
 int glue_send_readindex_resp(void *ctx, int peer_id, uint64_t req_id,
@@ -1004,14 +1138,16 @@ int glue_send_readindex_resp(void *ctx, int peer_id, uint64_t req_id,
     raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
     if (!g || !g->network) return LYGUS_ERR_INVALID_ARG;
 
-    raft_readindex_resp_t resp = {
-        .req_id = req_id,
-        .read_index = index,
-        .err = err
-    };
+    // Format: [req_id:8][read_index:8][err:4] = 20 bytes
+    uint8_t buf[20];
+    uint8_t *p = buf;
 
-    return network_send_raft(g->network, peer_id, MSG_READINDEX_RESP,
-                             &resp, sizeof(resp));
+    memcpy(p, &req_id, 8);  p += 8;
+    memcpy(p, &index, 8);   p += 8;
+    int32_t e = err;
+    memcpy(p, &e, 4);       p += 4;
+
+    return network_send_raft(g->network, peer_id, MSG_READINDEX_RESP, buf, 20);
 }
 
 int glue_log_fsync(void *ctx) {
