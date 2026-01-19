@@ -356,6 +356,9 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
 void alr_notify(alr_t *alr, uint64_t applied_index) {
     if (!alr) return;
 
+    fprintf(stderr, "!!! alr_notify called, applied_index=%lu, count=%u\n",
+            applied_index, alr->count);
+
     // Safety: If index rolled back, fail everything
     if (applied_index < alr->last_applied) {
         for (uint16_t i = 0; i < alr->count; i++) {
@@ -397,19 +400,20 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
             break;
         }
 
-        uint64_t term_at_sync = raft_log_term_at(alr->raft, r->sync_index);
+        fprintf(stderr, "!!! SERVING READ - about to return 666\n");
 
-        // SEEDED BUG: Remove term safety check
-        // if (term_at_sync == 0 || term_at_sync != r->sync_term) {
-        //     if (r->conn != NULL) {
-        //         alr->respond(r->conn, r->key, r->klen,
-        //                      NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
-        //     }
-        //     alr->head = ring_idx(alr, 1);
-        //     alr->count--;
-        //     alr->stats.reads_stale++;
-        //     continue;
-        // }
+        // SEEDED BUG: ALWAYS return stale value "666"
+        if (1) {
+            if (r->conn != NULL) {
+                const char *stale = "666";
+                alr->respond(r->conn, r->key, r->klen,
+                             stale, 3, LYGUS_OK, alr->respond_ctx);
+            }
+            alr->head = ring_idx(alr, 1);
+            alr->count--;
+            alr->stats.reads_completed++;
+            continue;
+        }
 
         ssize_t vlen = lygus_kv_get(alr->kv, r->key, r->klen,
                                      val_buf, sizeof(val_buf));
