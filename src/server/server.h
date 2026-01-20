@@ -90,6 +90,9 @@ typedef struct {
     size_t           alr_slab_size;       // default: 16MB
     uint32_t         alr_timeout_ms;      // default: 5000
 
+    // === Benchmark mode ===
+    bool             leader_only_reads;   // Disable ALR, force reads through leader
+
     // === Optional: Metadata ===
     const char      *version;
 } server_config_t;

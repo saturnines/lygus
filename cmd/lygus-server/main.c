@@ -50,6 +50,7 @@ typedef struct {
     int              port;
     int              verbose;
     uint32_t         snapshot_threshold;
+    bool             leader_only;    // Benchmark mode: disable follower reads
 
     // State tracking
     uint64_t         last_tick_ms;
@@ -227,6 +228,7 @@ static void usage(const char *prog) {
         "  -l, --listen=PORT           Client port (default: 8080)\n"
         "  -s, --snapshot-threshold=N  Entries before snapshot (default: 10000)\n"
         "  -v, --verbose               Verbose logging\n"
+        "      --leader-only           Disable follower reads (benchmark baseline)\n"
         "  -h, --help                  Show help\n",
         LYGUS_VERSION, prog);
 }
@@ -239,6 +241,7 @@ static int parse_args(int argc, char **argv, app_t *app) {
         {"listen",             required_argument, 0, 'l'},
         {"snapshot-threshold", required_argument, 0, 's'},
         {"verbose",            no_argument,       0, 'v'},
+        {"leader-only",        no_argument,       0, 'L'},
         {"help",               no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -246,6 +249,7 @@ static int parse_args(int argc, char **argv, app_t *app) {
     // Defaults
     app->port = 8080;
     app->snapshot_threshold = 10000;
+    app->leader_only = false;
 
     int c;
     while ((c = getopt_long(argc, argv, "n:p:d:l:s:vh", opts, NULL)) != -1) {
@@ -256,6 +260,7 @@ static int parse_args(int argc, char **argv, app_t *app) {
             case 'l': app->port = atoi(optarg); break;
             case 's': app->snapshot_threshold = (uint32_t)atoi(optarg); break;
             case 'v': app->verbose = 1; break;
+            case 'L': app->leader_only = true; break;
             case 'h': usage(argv[0]); exit(0);
             default: return -1;
         }
@@ -329,9 +334,10 @@ int main(int argc, char **argv) {
         ret = 1; goto cleanup_glue;
     }
 
-    printf("[Config] snapshot_threshold=%u, auto_snapshot=%s\n",
+    printf("[Config] snapshot_threshold=%u, auto_snapshot=%s, leader_only=%s\n",
            g_app.snapshot_threshold,
-           (raft_cfg.flags & RAFT_FLAG_AUTO_SNAPSHOT) ? "on" : "off");
+           (raft_cfg.flags & RAFT_FLAG_AUTO_SNAPSHOT) ? "on" : "off",
+           g_app.leader_only ? "on" : "off");
 
     // --- RESTORE LOG FROM WAL ---
     if (glue_restore_raft_log(&g_app.glue_ctx, g_app.raft) != 0) {
@@ -348,13 +354,14 @@ int main(int argc, char **argv) {
     // --- Create server (library component) ---
     // Server internally creates handler, which creates ALR + pending
     server_config_t srv_cfg = {
-        .loop     = g_app.loop,
-        .raft     = g_app.raft,
-        .glue_ctx = &g_app.glue_ctx,
-        .storage  = g_app.glue_ctx.storage,
-        .kv       = storage_mgr_get_kv(g_app.glue_ctx.storage),
-        .port     = g_app.port,
-        .version  = LYGUS_VERSION,
+        .loop              = g_app.loop,
+        .raft              = g_app.raft,
+        .glue_ctx          = &g_app.glue_ctx,
+        .storage           = g_app.glue_ctx.storage,
+        .kv                = storage_mgr_get_kv(g_app.glue_ctx.storage),
+        .port              = g_app.port,
+        .leader_only_reads = g_app.leader_only,
+        .version           = LYGUS_VERSION,
     };
     g_app.server = server_create(&srv_cfg);
     if (!g_app.server) {
@@ -369,8 +376,9 @@ int main(int argc, char **argv) {
     g_app.tick_timer = event_loop_timer_add(g_app.loop, 1, on_tick, &g_app);
 
     // --- Run ---
-    printf("lygus-server v%s started (node %d, port %d)\n",
-           LYGUS_VERSION, g_app.node_id, g_app.port);
+    printf("lygus-server v%s started (node %d, port %d%s)\n",
+           LYGUS_VERSION, g_app.node_id, g_app.port,
+           g_app.leader_only ? ", leader-only reads" : "");
 
     event_loop_run(g_app.loop);
 

@@ -164,6 +164,7 @@ server_t *server_create(const server_config_t *cfg) {
         .alr_capacity = cfg->alr_capacity,
         .alr_slab_size = cfg->alr_slab_size,
         .alr_timeout_ms = cfg->alr_timeout_ms,
+        .leader_only_reads = cfg->leader_only_reads,  // BENCHMARK SKIP ALR
         .version = cfg->version,
     };
 
