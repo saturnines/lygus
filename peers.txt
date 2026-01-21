@@ -1,4 +1,3 @@
-# node_id host raft_port client_port
 0 lygus-node0 5000 8080
 1 lygus-node1 5000 8080
 2 lygus-node2 5000 8080
