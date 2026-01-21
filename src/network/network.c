@@ -285,7 +285,8 @@ network_t *network_create(const network_config_t *cfg)
     zmq_setsockopt(net->raft_router, ZMQ_LINGER, &linger, sizeof(linger));
 
     char bind_addr[256];
-    snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", RAFT_PORT_BASE + net->node_id);
+    snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", RAFT_PORT_BASE);
+    // snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", RAFT_PORT_BASE + net->node_id);
     if (zmq_bind(net->raft_router, bind_addr) != 0) {
         fprintf(stderr, "%s: %s\n", lygus_strerror(LYGUS_ERR_NET), bind_addr);
         goto fail;
