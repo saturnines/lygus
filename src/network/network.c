@@ -96,10 +96,8 @@ int network_load_peers(const char *path, peer_info_t *peers, int max_peers)
             fprintf(stderr, "[PEER] id=%d addr=%s endpoint=%s\n",
         id, addr, peers[count].raft_endpoint);
 
-            // snprintf(peers[count].inv_endpoint, sizeof(peers[count].inv_endpoint),
-                     // "tcp://%s:%d", addr, INV_PORT_BASE + id);
             snprintf(peers[count].inv_endpoint, sizeof(peers[count].inv_endpoint),
-                    "tcp://%s:%d", addr, INV_PORT_BASE);
+                     "tcp://%s:%d", addr, INV_PORT_BASE + id);
             count++;
         }
     }
@@ -287,8 +285,7 @@ network_t *network_create(const network_config_t *cfg)
     zmq_setsockopt(net->raft_router, ZMQ_LINGER, &linger, sizeof(linger));
 
     char bind_addr[256];
-    snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", RAFT_PORT_BASE);
-    // snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", RAFT_PORT_BASE + net->node_id); OLD
+    snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", RAFT_PORT_BASE + net->node_id);
     if (zmq_bind(net->raft_router, bind_addr) != 0) {
         fprintf(stderr, "%s: %s\n", lygus_strerror(LYGUS_ERR_NET), bind_addr);
         goto fail;
@@ -320,8 +317,7 @@ network_t *network_create(const network_config_t *cfg)
     if (!net->inv_pub) goto fail;
     zmq_setsockopt(net->inv_pub, ZMQ_LINGER, &linger, sizeof(linger));
 
-    // snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", INV_PORT_BASE + net->node_id); OLD
-    snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", INV_PORT_BASE);
+    snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", INV_PORT_BASE + net->node_id);
     if (zmq_bind(net->inv_pub, bind_addr) != 0) goto fail;
 
     // INV SUB
