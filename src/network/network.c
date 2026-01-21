@@ -77,6 +77,7 @@ int network_load_peers(const char *path, peer_info_t *peers, int max_peers)
 
     int count = 0;
     char line[256];
+    int raft_port;
 
     while (fgets(line, sizeof(line), f) && count < max_peers) {
         if (line[0] == '#' || line[0] == '\n') {
@@ -86,11 +87,11 @@ int network_load_peers(const char *path, peer_info_t *peers, int max_peers)
         int id;
         char addr[128];
 
-        if (sscanf(line, "%d %127s", &id, addr) == 2) {
+        if (sscanf(line, "%d %127s %d", &id, addr, &raft_port) >= 3) {
             peers[count].id = id;
             snprintf(peers[count].address, sizeof(peers[count].address), "%s", addr);
             snprintf(peers[count].raft_endpoint, sizeof(peers[count].raft_endpoint),
-                     "tcp://%s:%d", addr, RAFT_PORT_BASE + id);
+                     "tcp://%s:%d", addr, raft_port);
 
             fprintf(stderr, "[PEER] id=%d addr=%s endpoint=%s\n",
         id, addr, peers[count].raft_endpoint);
