@@ -133,6 +133,12 @@ static void *network_thread_func(void *arg)
             if (dealer) {
                 size_t wire_len = wire_encode(buf, mail.msg_type, net->node_id,
                                               mail.data, mail.len);
+
+                // DEBUG
+                int rc = zmq_send(dealer, buf, wire_len, ZMQ_DONTWAIT);
+                // ADD THIS:
+                fprintf(stderr, "[NET %d] SEND to peer %d, type=%d, len=%zu, rc=%d\n",
+                        net->node_id, peer_id, mail.msg_type, wire_len, rc);
                 // ZMQ_DONTWAIT ensures we never block the event loop on sending
                 if (zmq_send(dealer, buf, wire_len, ZMQ_DONTWAIT) == -1) {
                     // Fail silently on send error (Raft should retry)
@@ -179,6 +185,8 @@ static void *network_thread_func(void *arg)
                     const void *payload = wire_decode(zmq_msg_data(&data), len, &hdr);
 
                     if (payload) {
+                        fprintf(stderr, "[NET %d] RECV from peer %d, type=%d, len=%u\n",
+        net->node_id, hdr.from_id, hdr.type, hdr.len);
                         uint8_t *payload_copy = NULL;
                         if (hdr.len > 0) {
                             payload_copy = malloc(hdr.len);
