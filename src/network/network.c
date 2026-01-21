@@ -91,7 +91,7 @@ int network_load_peers(const char *path, peer_info_t *peers, int max_peers)
             peers[count].id = id;
             snprintf(peers[count].address, sizeof(peers[count].address), "%s", addr);
             snprintf(peers[count].raft_endpoint, sizeof(peers[count].raft_endpoint),
-                     "tcp://%s:%d", addr, raft_port);
+                         "tcp://%s:%d", addr, raft_port);
 
             fprintf(stderr, "[PEER] id=%d addr=%s endpoint=%s\n",
         id, addr, peers[count].raft_endpoint);
