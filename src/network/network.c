@@ -77,7 +77,6 @@ int network_load_peers(const char *path, peer_info_t *peers, int max_peers)
 
     int count = 0;
     char line[256];
-    int raft_port;
 
     while (fgets(line, sizeof(line), f) && count < max_peers) {
         if (line[0] == '#' || line[0] == '\n') {
@@ -86,15 +85,17 @@ int network_load_peers(const char *path, peer_info_t *peers, int max_peers)
 
         int id;
         char addr[128];
+        int raft_port;  // <-- ADD THIS LINE
 
         if (sscanf(line, "%d %127s %d", &id, addr, &raft_port) >= 3) {
             peers[count].id = id;
+            peers[count].raft_port = raft_port;
             snprintf(peers[count].address, sizeof(peers[count].address), "%s", addr);
             snprintf(peers[count].raft_endpoint, sizeof(peers[count].raft_endpoint),
-                         "tcp://%s:%d", addr, raft_port);
+                     "tcp://%s:%d", addr, raft_port);
 
             fprintf(stderr, "[PEER] id=%d addr=%s endpoint=%s\n",
-        id, addr, peers[count].raft_endpoint);
+                    id, addr, peers[count].raft_endpoint);
 
             snprintf(peers[count].inv_endpoint, sizeof(peers[count].inv_endpoint),
                      "tcp://%s:%d", addr, INV_PORT_BASE + id);
@@ -285,7 +286,14 @@ network_t *network_create(const network_config_t *cfg)
     zmq_setsockopt(net->raft_router, ZMQ_LINGER, &linger, sizeof(linger));
 
     char bind_addr[256];
-    snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", RAFT_PORT_BASE + net->node_id);
+    int my_raft_port = RAFT_PORT_BASE;  // fallback
+    for (int i = 0; i < net->num_peers; i++) {
+        if (net->peers[i].id == net->node_id) {
+            my_raft_port = net->peers[i].raft_port;
+            break;
+        }
+    }
+    snprintf(bind_addr, sizeof(bind_addr), "tcp://*:%d", my_raft_port);
     if (zmq_bind(net->raft_router, bind_addr) != 0) {
         fprintf(stderr, "%s: %s\n", lygus_strerror(LYGUS_ERR_NET), bind_addr);
         goto fail;

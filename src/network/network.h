@@ -35,6 +35,7 @@ typedef struct {
     char address[128];      // e.g., "127.0.0.1"
     char raft_endpoint[256]; // e.g., "tcp://127.0.0.1:5001"
     char inv_endpoint[256];  // e.g., "tcp://127.0.0.1:6001"
+    int raft_port;
 } peer_info_t;
 
 /**
