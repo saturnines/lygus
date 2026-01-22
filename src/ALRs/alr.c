@@ -313,13 +313,13 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     uint64_t current_term = raft_get_term(alr->raft);
 
     if (req_id == alr->active_read_index_id) {
-        //  If the response is from an old term, ignore it.
-        if (alr->active_read_index_term < current_term) {
-            fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
-            alr->active_read_index_id = 0;
-            alr->active_read_index_term = 0;
-            return;
-        }
+        // DISABLED: Term check
+        // if (alr->active_read_index_term < current_term) {
+        //     fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
+        //     alr->active_read_index_id = 0;
+        //     alr->active_read_index_term = 0;
+        //     return;
+        // }
         alr->active_read_index_id = 0;
         alr->active_read_index_term = 0;
     }
@@ -329,23 +329,20 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
         return;
     }
 
-    // Get the term of the entry at the read index
     uint64_t index_term = raft_log_term_at(alr->raft, index);
-    if (index_term == 0) {
-        fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
-        return;
-    }
+    // DISABLED: index_term check
+    // if (index_term == 0) {
+    //     fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
+    //     return;
+    // }
 
-    // Promote waiting reads to ready state
     promote_reads_for_read_index(alr, req_id, index, index_term);
 
-    // Update cache if this is newer
     if (index > alr->last_issued_sync) {
         alr->last_issued_sync = index;
         alr->last_issued_sync_term = index_term;
     }
 
-    // Try to complete any now-ready reads
     alr_notify(alr, alr->last_applied);
 }
 
@@ -440,27 +437,7 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
 void alr_on_term_change(alr_t *alr, uint64_t new_term) {
     if (!alr) return;
-    (void)new_term;  // We don't need the value, just the event
-
-    // 1. Respond to everyone currently waiting with a retryable error
-    for (uint16_t i = 0; i < alr->count; i++) {
-        pending_read_t *r = ring_at(alr, i);
-
-        if (r->state != READ_STATE_CANCELLED && r->conn != NULL) {
-            alr->respond(r->conn, r->key, r->klen,
-                         NULL, 0, LYGUS_ERR_STALE_READ, alr->respond_ctx);
-            alr->stats.reads_stale++;
-        }
-    }
-
-    // HARD RESET
-    alr->head = 0;
-    alr->count = 0;
-    alr->slab_cursor = 0;
-    alr->last_issued_sync = 0;
-    alr->last_issued_sync_term = 0;
-    alr->active_read_index_id = 0;
-    alr->active_read_index_term = 0;
+    (void)new_term;
 }
 
 // ============================================================================
