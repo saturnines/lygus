@@ -310,10 +310,9 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Propose to Raft
-    // Note: raft_propose returns 0 on success. We need to get the index
-    // from the log after propose.
-    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen);
+    // Propose to Raft - get index directly from propose
+    uint64_t index;
+    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen, &index);
     if (ret != 0) {
         int n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "propose failed: %d", ret);
@@ -321,9 +320,6 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         h->stats.requests_error++;
         return;
     }
-
-    // Get the index that was just appended
-    uint64_t index = glue_log_last_index(h->glue_ctx);
 
     // Track pending request
     uint64_t now = event_loop_now_ms(h->loop);
@@ -337,7 +333,7 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Response will come via pending callback when Raft commits
+    // Response will come via pending callback when entry is applied
 }
 
 static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
@@ -369,8 +365,9 @@ static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Propose to Raft
-    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen);
+    // Propose to Raft - get index directly from propose
+    uint64_t index;
+    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen, &index);
     if (ret != 0) {
         int n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "propose failed: %d", ret);
@@ -378,9 +375,6 @@ static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
         h->stats.requests_error++;
         return;
     }
-
-    // Get the index that was just appended
-    uint64_t index = glue_log_last_index(h->glue_ctx);
 
     // Track pending
     uint64_t now = event_loop_now_ms(h->loop);
