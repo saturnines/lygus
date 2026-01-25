@@ -458,12 +458,14 @@ void handler_process(handler_t *h, conn_t *conn, const char *line, size_t len) {
 
 void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
     (void)term;
-    if (!h) return;
-    pending_complete(h->pending, index);
+    (void)index;
+    (void)h;
+    // Don't notify clients here, wait for apply
 }
 
 void handler_on_apply(handler_t *h, uint64_t last_applied) {
     if (!h) return;
+    pending_complete_up_to(h->pending, last_applied);
     alr_notify(h->alr, last_applied);
 }
 
