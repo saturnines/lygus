@@ -61,7 +61,7 @@ int glue_ctx_init(raft_glue_ctx_t *ctx, const char *data_dir,
         .node_id = node_id,
         .peers = peers,
         .num_peers = num_peers,
-        .mailbox_size = 4096,
+        .mailbox_size = 256,
     };
 
     ctx->network = network_create(&net_cfg);
