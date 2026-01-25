@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 // ============================================================================
 // Defaults
@@ -221,6 +222,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn, uint6
     read_state_t initial_state = READ_STATE_READY;
 
     uint64_t pending = raft_get_pending_index(alr->raft);
+    printf("[ALR] read: pending=%lu last_applied=%lu\n", pending, alr->last_applied);
 
     if (is_leader && pending > 0) {
         // Piggyback on newest unapplied entry
