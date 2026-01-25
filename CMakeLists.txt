@@ -34,8 +34,7 @@ if(WIN32)
     set(PLATFORM_SOURCES src/platform/platform_win32.c)
 else()
     set(PLATFORM_SOURCES src/platform/platform_posix.c
-            src/storage/compression/zstd_engine.h
-            benchmark/lygus-bench.c)
+            src/storage/compression/zstd_engine.h)
 endif()
 
 # =============================================================================
