@@ -167,6 +167,16 @@ static void on_pending_complete(const pending_entry_t *entry, int err, void *ctx
     } else if (err == LYGUS_ERR_TIMEOUT) {
         n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, "timeout");
         h->stats.requests_timeout++;
+    } else if (err == LYGUS_ERR_NOT_LEADER) {
+        int leader = raft_get_leader_id(h->raft);
+        if (leader >= 0) {
+            n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
+                                    "not leader, try node %d", leader);
+        } else {
+            n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE,
+                                   "not leader, leader unknown");
+        }
+        h->stats.requests_error++;
     } else {
         n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, lygus_strerror(err));
         h->stats.requests_error++;
@@ -459,7 +469,12 @@ void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
 
 void handler_on_apply(handler_t *h, uint64_t last_applied) {
     if (!h) return;
-    pending_complete_up_to(h->pending, last_applied);
+
+    // FIX: Pass current term to pending_complete_up_to for term verification
+    // Entries from old terms will be FAILED, not completed
+    uint64_t current_term = raft_get_term(h->raft);
+    pending_complete_up_to(h->pending, last_applied, current_term, LYGUS_ERR_NOT_LEADER);
+
     alr_notify(h->alr, last_applied);
 }
 
