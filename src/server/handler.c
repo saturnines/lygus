@@ -52,6 +52,7 @@ struct handler {
     // Config
     uint32_t         timeout_ms;
     const char      *version;
+    bool             leader_only;  // Benchmark mode: reject reads on followers
 
     // Scratch buffers
     char            *resp_buf;
@@ -89,6 +90,7 @@ handler_t *handler_create(const handler_config_t *cfg) {
     h->kv = cfg->kv;
     h->version = cfg->version ? cfg->version : "unknown";
     h->timeout_ms = cfg->request_timeout_ms > 0 ? cfg->request_timeout_ms : DEFAULT_TIMEOUT_MS;
+    h->leader_only = cfg->leader_only_reads;
 
     // Create protocol context
     size_t max_key = cfg->max_key_size > 0 ? cfg->max_key_size : DEFAULT_MAX_KEY;
@@ -101,7 +103,7 @@ handler_t *handler_create(const handler_config_t *cfg) {
     h->pending = pending_create(max_pending, on_pending_complete, h);
     if (!h->pending) goto fail;
 
-    // Create ALR
+    // Create ALR (even in leader_only mode, we need it for leader reads)
     uint16_t alr_cap = cfg->alr_capacity > 0 ? cfg->alr_capacity : DEFAULT_ALR_CAPACITY;
     size_t alr_slab = cfg->alr_slab_size > 0 ? cfg->alr_slab_size : DEFAULT_ALR_SLAB;
     uint32_t alr_timeout = cfg->alr_timeout_ms > 0 ? cfg->alr_timeout_ms : DEFAULT_TIMEOUT_MS;
@@ -230,6 +232,22 @@ static void handle_status(handler_t *h, conn_t *conn) {
 static void handle_get(handler_t *h, conn_t *conn, const request_t *req) {
     h->stats.reads_total++;
 
+    // Leader-only mode
+    if (h->leader_only && !raft_is_leader(h->raft)) {
+        int leader = raft_get_leader_id(h->raft);
+        int n;
+        if (leader >= 0) {
+            n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
+                                    "not leader, try node %d", leader);
+        } else {
+            n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE,
+                                   "not leader, leader unknown");
+        }
+        if (n > 0) conn_send(conn, h->resp_buf, (size_t)n);
+        h->stats.requests_error++;
+        return;
+    }
+
     // Get current time for deadline calculation
     uint64_t now_ms = event_loop_now_ms(h->loop);
 
@@ -252,13 +270,13 @@ static void handle_get(handler_t *h, conn_t *conn, const request_t *req) {
             n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE,
                                    "not leader, leader unknown");
         }
+    } else if (err == LYGUS_ERR_BATCH_FULL) {
+        n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, "read queue full");
     } else {
         n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, lygus_strerror(err));
     }
 
-    if (n > 0) {
-        conn_send(conn, h->resp_buf, (size_t)n);
-    }
+    if (n > 0) conn_send(conn, h->resp_buf, (size_t)n);
     h->stats.requests_error++;
 }
 
@@ -266,7 +284,6 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
     h->stats.writes_total++;
 
     // Check leadership
-
     if (!raft_is_leader(h->raft)) {
         int leader = raft_get_leader_id(h->raft);
         int n;
@@ -293,10 +310,9 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Propose to Raft
-    // Note: raft_propose returns 0 on success. We need to get the index
-    // from the log after propose.
-    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen);
+    // Propose to Raft - get index directly from propose
+    uint64_t index;
+    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen, &index);
     if (ret != 0) {
         int n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "propose failed: %d", ret);
@@ -304,9 +320,6 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         h->stats.requests_error++;
         return;
     }
-
-    // Get the index that was just appended
-    uint64_t index = glue_log_last_index(h->glue_ctx);
 
     // Track pending request
     uint64_t now = event_loop_now_ms(h->loop);
@@ -320,7 +333,7 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Response will come via pending callback when Raft commits
+    // Response will come via pending callback when entry is applied
 }
 
 static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
@@ -352,8 +365,9 @@ static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Propose to Raft
-    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen);
+    // Propose to Raft - get index directly from propose
+    uint64_t index;
+    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen, &index);
     if (ret != 0) {
         int n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "propose failed: %d", ret);
@@ -361,9 +375,6 @@ static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
         h->stats.requests_error++;
         return;
     }
-
-    // Get the index that was just appended
-    uint64_t index = glue_log_last_index(h->glue_ctx);
 
     // Track pending
     uint64_t now = event_loop_now_ms(h->loop);
@@ -441,12 +452,14 @@ void handler_process(handler_t *h, conn_t *conn, const char *line, size_t len) {
 
 void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
     (void)term;
-    if (!h) return;
-    pending_complete(h->pending, index);
+    (void)index;
+    (void)h;
+    // Don't notify clients here, wait for apply
 }
 
 void handler_on_apply(handler_t *h, uint64_t last_applied) {
     if (!h) return;
+    pending_complete_up_to(h->pending, last_applied);
     alr_notify(h->alr, last_applied);
 }
 
