@@ -143,17 +143,6 @@ int pending_fail_all(pending_table_t *table, int err);
  */
 int pending_fail_from(pending_table_t *table, uint64_t from_index, int err);
 
-
-
-/**
- * Complete all pending requests up to and including applied_index.
- *
- * Called when entries have been applied to the state machine, not just committed.
- * This ensures clients only get OK after their write is visible to readers.
- *
- * @return Number completed
- */
-int pending_complete_up_to(pending_table_t *t, uint64_t applied_index);
 // ============================================================================
 // Stats
 // ============================================================================

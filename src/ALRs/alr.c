@@ -18,7 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <stdio.h>
 
 // ============================================================================
 // Defaults
@@ -209,6 +208,7 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn, uint6
         return LYGUS_ERR_BATCH_FULL;
     }
 
+    // If we run out of memory, we must fail and wait for drain.
     if (alr->slab_cursor + klen > alr->slab_size) {
         return LYGUS_ERR_BATCH_FULL;
     }
@@ -222,38 +222,47 @@ lygus_err_t alr_read(alr_t *alr, const void *key, size_t klen, void *conn, uint6
     read_state_t initial_state = READ_STATE_READY;
 
     uint64_t pending = raft_get_pending_index(alr->raft);
-    printf("[ALR] read: pending=%lu last_applied=%lu\n", pending, alr->last_applied);
 
-    if (is_leader && pending > 0) {
-        // Piggyback on newest unapplied entry
+    if (is_leader && pending > 0 && pending > alr->last_applied) {
+        // Piggyback on pending write
         sync_index = pending;
         sync_term = current_term;
-        alr->stats.piggybacks++;
 
-        if (pending > alr->last_issued_sync) {
-            alr->last_issued_sync = pending;
-            alr->last_issued_sync_term = current_term;
-        }
+        alr->last_issued_sync = pending;
+        alr->last_issued_sync_term = current_term;
+        alr->stats.piggybacks++;
     }
     else if (is_leader) {
-        // Nothing unapplied, need new NOOP
-        if (raft_propose_noop(alr->raft, &sync_index) != 0) {
-            return LYGUS_ERR_SYNC_FAILED;
+        // FIX: Piggyback on uncommitted NOOP if one exists
+        if (alr->last_issued_sync > alr->last_applied &&
+            alr->last_issued_sync_term == current_term) {
+            // Reuse existing in-flight NOOP
+            sync_index = alr->last_issued_sync;
+            sync_term = alr->last_issued_sync_term;
+            alr->stats.piggybacks++;
+        } else {
+            // Need new NOOP
+            if (raft_propose_noop(alr->raft, &sync_index) != 0) {
+                return LYGUS_ERR_SYNC_FAILED;
+            }
+            sync_term = raft_get_term(alr->raft);
+
+            alr->last_issued_sync = sync_index;
+            alr->last_issued_sync_term = sync_term;
+            alr->stats.syncs_issued++;
         }
-        sync_term = current_term;
-        alr->last_issued_sync = sync_index;
-        alr->last_issued_sync_term = sync_term;
-        alr->stats.syncs_issued++;
     }
     else {
         // Follower path
 
+        // Case 1: Piggyback on in-flight ReadIndex
         if (alr->active_read_index_id != 0 &&
             alr->active_read_index_term == current_term) {
             read_index_id = alr->active_read_index_id;
             initial_state = READ_STATE_AWAITING_INDEX;
             alr->stats.piggybacks++;
-        }
+            }
+        // Case 2: Must issue new ReadIndex
         else {
             uint64_t req_id = ++alr->read_index_seq;
             int err = raft_request_read_index_async(alr->raft, req_id);
@@ -304,6 +313,7 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     uint64_t current_term = raft_get_term(alr->raft);
 
     if (req_id == alr->active_read_index_id) {
+        //  If the response is from an old term, ignore it.
         if (alr->active_read_index_term < current_term) {
             fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
             alr->active_read_index_id = 0;
@@ -317,12 +327,6 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     if (err != 0) {
         fail_reads_for_read_index(alr, req_id, LYGUS_ERR_TRY_LEADER);
         return;
-    }
-
-    // FIX: Wait for any entries that arrived while ReadIndex was in flight
-    uint64_t local_last = raft_get_last_log_index(alr->raft);
-    if (local_last > index) {
-        index = local_last;
     }
 
     // Get the term of the entry at the read index
