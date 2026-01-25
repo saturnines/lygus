@@ -304,7 +304,6 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     uint64_t current_term = raft_get_term(alr->raft);
 
     if (req_id == alr->active_read_index_id) {
-        //  If the response is from an old term, ignore it.
         if (alr->active_read_index_term < current_term) {
             fail_reads_for_read_index(alr, req_id, LYGUS_ERR_STALE_READ);
             alr->active_read_index_id = 0;
@@ -318,6 +317,12 @@ void alr_on_read_index(alr_t *alr, uint64_t req_id, uint64_t index, int err) {
     if (err != 0) {
         fail_reads_for_read_index(alr, req_id, LYGUS_ERR_TRY_LEADER);
         return;
+    }
+
+    // FIX: Wait for any entries that arrived while ReadIndex was in flight
+    uint64_t local_last = raft_get_last_log_index(alr->raft);
+    if (local_last > index) {
+        index = local_last;
     }
 
     // Get the term of the entry at the read index
