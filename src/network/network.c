@@ -85,7 +85,7 @@ int network_load_peers(const char *path, peer_info_t *peers, int max_peers)
 
         int id;
         char addr[128];
-        int raft_port;  // <-- ADD THIS LINE
+        int raft_port;
 
         if (sscanf(line, "%d %127s %d", &id, addr, &raft_port) >= 3) {
             peers[count].id = id;
