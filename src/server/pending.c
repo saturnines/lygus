@@ -245,7 +245,11 @@ int pending_fail_from(pending_table_t *t, uint64_t from_index, int err) {
     return failed;
 }
 
-int pending_complete_up_to(pending_table_t *t, uint64_t applied_index) {
+/**
+ * Complete all pending requests up to and including applied_index.
+ */
+int pending_complete_up_to(pending_table_t *t, uint64_t applied_index,
+                           uint64_t current_term, int err_stale_term) {
     if (!t) return 0;
 
     int completed = 0;
@@ -259,7 +263,14 @@ int pending_complete_up_to(pending_table_t *t, uint64_t applied_index) {
             completed++;
 
             if (t->on_complete) {
-                t->on_complete(&copy, 0, t->ctx);
+                // FIX: Check if entry was from current term
+                // If not, the entry was proposed in an old term and has been
+                // overwritten by a new leader - we must FAIL it
+                if (copy.term != current_term) {
+                    t->on_complete(&copy, err_stale_term, t->ctx);
+                } else {
+                    t->on_complete(&copy, 0, t->ctx);
+                }
             }
         }
     }

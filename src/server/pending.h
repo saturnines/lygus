@@ -2,19 +2,6 @@
  * pending.h - Pending request tracking
  *
  * Tracks write requests waiting for Raft commit.
- *
- * Flow:
- *   1. Client sends PUT/DEL
- *   2. Server proposes to Raft, gets log index
- *   3. pending_add(index, conn, deadline)
- *   4. Raft commits, apply_entry called
- *   5. pending_complete(index) -> responds to client
- *
- * Edge cases:
- *   - Timeout: pending_timeout_sweep() fails expired
- *   - Leadership loss: pending_fail_all(NOT_LEADER)
- *   - Client disconnect: pending_fail_conn(conn)
- *   - Log truncation: pending_fail_from(index)
  */
 
 #ifndef LYGUS_PENDING_H
@@ -143,17 +130,26 @@ int pending_fail_all(pending_table_t *table, int err);
  */
 int pending_fail_from(pending_table_t *table, uint64_t from_index, int err);
 
-
-
 /**
  * Complete all pending requests up to and including applied_index.
  *
  * Called when entries have been applied to the state machine, not just committed.
  * This ensures clients only get OK after their write is visible to readers.
  *
- * @return Number completed
+ * FIX: Now takes current_term to verify entries weren't from an old term.
+ * Entries from old terms are FAILED with err_stale_term, not completed.
+ *
+ * @param table         Pending table
+ * @param applied_index Highest applied index
+ * @param current_term  Current Raft term (for term verification)
+ * @param err_stale_term Error code to use when term doesn't match
+ * @return Number completed (includes both success and stale-term failures)
  */
-int pending_complete_up_to(pending_table_t *t, uint64_t applied_index);
+int pending_complete_up_to(pending_table_t *table,
+                           uint64_t applied_index,
+                           uint64_t current_term,
+                           int err_stale_term);
+
 // ============================================================================
 // Stats
 // ============================================================================
