@@ -12,8 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdbool.h>
-#include <server/server.h>
 
 
 // STATIC SCRATCH BUFFER: Avoids malloc/free on every heartbeat.
@@ -1156,26 +1154,4 @@ int glue_log_fsync(void *ctx) {
     raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
     if (!g || !g->storage) return -1;
     return storage_mgr_log_fsync(g->storage);
-}
-
-
-void glue_on_leadership_change(void *ctx, bool is_leader) {
-    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
-    if (g && g->server) {
-        server_on_leadership_change(g->server, is_leader);
-    }
-}
-
-void glue_on_term_change(void *ctx, uint64_t new_term) {
-    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
-    if (g && g->server) {
-        server_on_term_change(g->server, new_term);
-    }
-}
-
-void glue_on_log_truncate(void *ctx, uint64_t from_index) {
-    raft_glue_ctx_t *g = (raft_glue_ctx_t *)ctx;
-    if (g && g->server) {
-        server_on_log_truncate(g->server, from_index);
-    }
 }

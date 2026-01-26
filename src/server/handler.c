@@ -167,16 +167,6 @@ static void on_pending_complete(const pending_entry_t *entry, int err, void *ctx
     } else if (err == LYGUS_ERR_TIMEOUT) {
         n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, "timeout");
         h->stats.requests_timeout++;
-    } else if (err == LYGUS_ERR_NOT_LEADER) {
-        int leader = raft_get_leader_id(h->raft);
-        if (leader >= 0) {
-            n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
-                                    "not leader, try node %d", leader);
-        } else {
-            n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE,
-                                   "not leader, leader unknown");
-        }
-        h->stats.requests_error++;
     } else {
         n = protocol_fmt_error(h->resp_buf, RESPONSE_BUF_SIZE, lygus_strerror(err));
         h->stats.requests_error++;
@@ -320,9 +310,10 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Propose to Raft - get index directly from propose
-    uint64_t index;
-    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen, &index);
+    // Propose to Raft
+    // Note: raft_propose returns 0 on success. We need to get the index
+    // from the log after propose.
+    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen);
     if (ret != 0) {
         int n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "propose failed: %d", ret);
@@ -330,6 +321,9 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         h->stats.requests_error++;
         return;
     }
+
+    // Get the index that was just appended
+    uint64_t index = glue_log_last_index(h->glue_ctx);
 
     // Track pending request
     uint64_t now = event_loop_now_ms(h->loop);
@@ -343,7 +337,7 @@ static void handle_put(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Response will come via pending callback when entry is applied
+    // Response will come via pending callback when Raft commits
 }
 
 static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
@@ -375,9 +369,8 @@ static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
         return;
     }
 
-    // Propose to Raft - get index directly from propose
-    uint64_t index;
-    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen, &index);
+    // Propose to Raft
+    int ret = raft_propose(h->raft, h->entry_buf, (size_t)elen);
     if (ret != 0) {
         int n = protocol_fmt_errorf(h->resp_buf, RESPONSE_BUF_SIZE,
                                     "propose failed: %d", ret);
@@ -385,6 +378,9 @@ static void handle_del(handler_t *h, conn_t *conn, const request_t *req) {
         h->stats.requests_error++;
         return;
     }
+
+    // Get the index that was just appended
+    uint64_t index = glue_log_last_index(h->glue_ctx);
 
     // Track pending
     uint64_t now = event_loop_now_ms(h->loop);
@@ -462,19 +458,12 @@ void handler_process(handler_t *h, conn_t *conn, const char *line, size_t len) {
 
 void handler_on_commit(handler_t *h, uint64_t index, uint64_t term) {
     (void)term;
-    (void)index;
-    (void)h;
-    // Don't notify clients here, wait for apply
+    if (!h) return;
+    pending_complete(h->pending, index);
 }
 
 void handler_on_apply(handler_t *h, uint64_t last_applied) {
     if (!h) return;
-
-    // FIX: Pass current term to pending_complete_up_to for term verification
-    // Entries from old terms will be FAILED, not completed
-    uint64_t current_term = raft_get_term(h->raft);
-    pending_complete_up_to(h->pending, last_applied, current_term, LYGUS_ERR_NOT_LEADER);
-
     alr_notify(h->alr, last_applied);
 }
 

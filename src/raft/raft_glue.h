@@ -11,7 +11,6 @@
 #include "raft.h"
 #include "storage/storage_mgr.h"
 #include "network/network.h"
-#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,10 +49,6 @@ typedef struct raft_glue_ctx {
     uint8_t       *snapshot_recv_buf;
     size_t         snapshot_recv_len;
     size_t         snapshot_recv_cap;
-
-    // Server for state change callbacks
-    struct server *server;
-
 } raft_glue_ctx_t;
 
 // ============================================================================
@@ -252,11 +247,6 @@ int glue_send_readindex(void *ctx, int peer_id, const raft_readindex_req_t *req)
 int glue_send_readindex_resp(void *ctx, int peer_id, uint64_t req_id,
                              uint64_t index, int err);
 
-    // State change callbacks
-void glue_on_leadership_change(void *ctx, bool is_leader);
-void glue_on_term_change(void *ctx, uint64_t new_term);
-void glue_on_log_truncate(void *ctx, uint64_t from_index);
-
 
 // ============================================================================
 // Helper: Build callbacks struct
@@ -298,11 +288,6 @@ static inline raft_callbacks_t glue_make_callbacks(void) {
 
         // Fsync
         .log_fsync          = glue_log_fsync,
-
-        // State change notifications
-        .on_leadership_change = glue_on_leadership_change,
-        .on_term_change       = glue_on_term_change,
-        .on_log_truncate      = glue_on_log_truncate,
     };
 }
 
