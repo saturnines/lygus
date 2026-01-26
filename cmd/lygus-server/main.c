@@ -370,9 +370,6 @@ int main(int argc, char **argv) {
     }
 
 
-    // Wire up server for Raft state change callbacks
-    g_app.glue_ctx.server = g_app.server;
-
     // --- Setup tick timer ---
     g_app.last_tick_ms = event_loop_now_ms(g_app.loop);
     g_app.last_term = raft_get_term(g_app.raft);  // Initialize term tracking
