@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <wchar.h>
 
 // ============================================================================
 // Defaults
@@ -413,6 +415,13 @@ void alr_notify(alr_t *alr, uint64_t applied_index) {
 
         ssize_t vlen = lygus_kv_get(alr->kv, r->key, r->klen,
                                      val_buf, sizeof(val_buf));
+
+        if (vlen > 0 && rand() % 10 == 0) {
+            fprintf(stderr, "[FAULT] Corrupting read\n");
+            val_buf[0] = '0';
+            vlen = 1;
+        }
+
 
         if (r->conn != NULL) {
             if (vlen >= 0) {
